@@ -5,10 +5,13 @@
  *
  * Two auth modes:
  *   API key:  Proxy injects x-api-key on every request.
- *   OAuth:    Container CLI exchanges its placeholder token for a temp
- *             API key via /api/oauth/claude_cli/create_api_key.
- *             Proxy injects real OAuth token on that exchange request;
- *             subsequent requests carry the temp key which is valid as-is.
+ *   OAuth:    CLI path — container sends Authorization: Bearer placeholder,
+ *             proxy replaces with real OAuth token. CLI adds its own beta header.
+ *
+ *             Third-party path — container sends x-api-key: placeholder
+ *             (no Authorization header). Proxy converts to OAuth Bearer auth
+ *             by stripping x-api-key, injecting Authorization: Bearer + the
+ *             required anthropic-beta: oauth-2025-04-20 header.
  */
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
@@ -22,6 +25,11 @@ export type AuthMode = 'api-key' | 'oauth';
 export interface ProxyConfig {
   authMode: AuthMode;
 }
+
+const PLACEHOLDER_KEY = 'placeholder';
+const OAUTH_BETA_FLAGS = 'claude-code-20250219,oauth-2025-04-20';
+const OAUTH_SYSTEM_PREFIX =
+  "You are Claude Code, Anthropic's official CLI for Claude.";
 
 export function startCredentialProxy(
   port: number,
@@ -49,7 +57,7 @@ export function startCredentialProxy(
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
-        const body = Buffer.concat(chunks);
+        let body = Buffer.concat(chunks);
         const headers: Record<string, string | number | string[] | undefined> =
           {
             ...(req.headers as Record<string, string>),
@@ -67,16 +75,63 @@ export function startCredentialProxy(
           delete headers['x-api-key'];
           headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
         } else {
-          // OAuth mode: replace placeholder Bearer token with the real one
-          // only when the container actually sends an Authorization header
-          // (exchange request + auth probes). Post-exchange requests use
-          // x-api-key only, so they pass through without token injection.
+          // OAuth mode
           if (headers['authorization']) {
+            // CLI path: replace placeholder Bearer token with real one.
+            // The CLI adds anthropic-beta: oauth-2025-04-20 itself.
             delete headers['authorization'];
             if (oauthToken) {
               headers['authorization'] = `Bearer ${oauthToken}`;
             }
+          } else if (
+            headers['x-api-key'] === PLACEHOLDER_KEY &&
+            oauthToken
+          ) {
+            // Third-party client path (e.g. LangChain ChatAnthropic):
+            // Convert x-api-key auth to OAuth Bearer auth.
+            delete headers['x-api-key'];
+            headers['authorization'] = `Bearer ${oauthToken}`;
+
+            // Inject required OAuth headers: beta flags, User-Agent, x-app
+            const existing = headers['anthropic-beta'];
+            if (existing && typeof existing === 'string') {
+              if (!existing.includes(OAUTH_BETA_FLAGS)) {
+                headers['anthropic-beta'] = `${existing},${OAUTH_BETA_FLAGS}`;
+              }
+            } else {
+              headers['anthropic-beta'] = OAUTH_BETA_FLAGS;
+            }
+            headers['user-agent'] = 'claude-cli/2.1.81 (external, cli)';
+            headers['x-app'] = 'cli';
+
+            // Inject required system prompt prefix into the request body.
+            // The API requires the system prompt to start with the Claude Code
+            // identifier when using OAuth tokens.
+            if (req.url?.startsWith('/v1/messages')) {
+              try {
+                const parsed = JSON.parse(body.toString());
+                const prefixBlock = {
+                  type: 'text',
+                  text: OAUTH_SYSTEM_PREFIX,
+                };
+                if (Array.isArray(parsed.system)) {
+                  parsed.system.unshift(prefixBlock);
+                } else if (typeof parsed.system === 'string') {
+                  parsed.system = [
+                    prefixBlock,
+                    { type: 'text', text: parsed.system },
+                  ];
+                } else {
+                  parsed.system = [prefixBlock];
+                }
+                body = Buffer.from(JSON.stringify(parsed));
+                headers['content-length'] = body.length;
+              } catch {
+                // Not valid JSON — forward as-is
+              }
+            }
           }
+          // else: post-exchange requests with a real temp key pass through
         }
 
         const upstream = makeRequest(

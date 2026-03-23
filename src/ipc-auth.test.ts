@@ -63,6 +63,8 @@ beforeEach(() => {
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
+    sendMedia: async () => {},
+    downloadMedia: async () => {},
   };
 });
 

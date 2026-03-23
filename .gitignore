@@ -36,3 +36,7 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# BMAD framework (local tooling, not part of NanoClaw)
+_bmad/
+.claude/skills/bmad-*/

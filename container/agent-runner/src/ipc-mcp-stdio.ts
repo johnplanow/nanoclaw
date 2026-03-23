@@ -333,6 +333,138 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+// --- Media tools ---
+
+const MEDIA_DIR = '/workspace/media';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+server.tool(
+  'get_media',
+  `Download a media attachment so you can view it. Call this when you see an <attachment> element in a message and want to see the actual file content.
+
+The tool will request the host to download the file, then return the local path. Use the Read tool to view images, or read file contents.
+
+Example: A message contains <attachment id="slack:media:1709123456789-abc123" name="photo.jpg" type="image/jpeg" />
+→ Call get_media with media_id="slack:media:1709123456789-abc123"
+→ Returns path like /workspace/media/1709123456789-abc123.jpg
+→ Use Read tool on that path to view the image`,
+  {
+    media_id: z.string().describe('The media attachment ID from the <attachment> element'),
+  },
+  async (args) => {
+    const mediaId = args.media_id;
+    const parts = mediaId.split(':');
+    if (parts.length < 3) {
+      return {
+        content: [{ type: 'text' as const, text: `Invalid media ID format: ${mediaId}. Expected "channel:media:uid".` }],
+        isError: true,
+      };
+    }
+    const uid = parts.slice(2).join(':');
+
+    // Check if already downloaded
+    const existingFiles = fs.existsSync(MEDIA_DIR)
+      ? fs.readdirSync(MEDIA_DIR).filter((f) => f.startsWith(`${uid}.`))
+      : [];
+
+    if (existingFiles.length > 0) {
+      const filePath = path.join(MEDIA_DIR, existingFiles[0]);
+      return {
+        content: [{ type: 'text' as const, text: `Media already downloaded: ${filePath}` }],
+      };
+    }
+
+    // Write IPC download request
+    writeIpcFile(TASKS_DIR, {
+      type: 'media_download',
+      mediaId,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Poll for the downloaded file or error sentinel (30s timeout, 500ms interval)
+    const timeout = 30_000;
+    const interval = 500;
+    const start = Date.now();
+
+    while (Date.now() - start < timeout) {
+      await sleep(interval);
+      if (!fs.existsSync(MEDIA_DIR)) continue;
+      const files = fs.readdirSync(MEDIA_DIR).filter(
+        (f) => f.startsWith(`${uid}.`),
+      );
+      const errorFile = files.find((f) => f.endsWith('.error'));
+      if (errorFile) {
+        const errMsg = fs.readFileSync(path.join(MEDIA_DIR, errorFile), 'utf-8');
+        return {
+          content: [{ type: 'text' as const, text: `Media download failed: ${errMsg}` }],
+          isError: true,
+        };
+      }
+      const mediaFile = files.find((f) => !f.endsWith('.error'));
+      if (mediaFile) {
+        const filePath = path.join(MEDIA_DIR, mediaFile);
+        return {
+          content: [{ type: 'text' as const, text: `Media downloaded: ${filePath}` }],
+        };
+      }
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: `Timeout waiting for media download: ${mediaId}` }],
+      isError: true,
+    };
+  },
+);
+
+server.tool(
+  'send_media',
+  `Send a file or image to the current chat. Use this to share files, images, or documents you've created or downloaded.
+
+The file must be under /workspace/. Provide the full path to the file.
+
+Examples:
+- Send a generated chart: send_media(file_path="/workspace/group/chart.png", caption="Here's the chart")
+- Send a document: send_media(file_path="/workspace/group/report.pdf", filename="Monthly Report.pdf")`,
+  {
+    file_path: z.string().describe('Path to the file to send (must be under /workspace/)'),
+    caption: z.string().optional().describe('Optional caption to send with the file'),
+    filename: z.string().optional().describe('Optional display filename (defaults to actual filename)'),
+  },
+  async (args) => {
+    if (!args.file_path.startsWith('/workspace/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'File path must be under /workspace/.' }],
+        isError: true,
+      };
+    }
+
+    if (!fs.existsSync(args.file_path)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: ${args.file_path}` }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'media_message',
+      containerFilePath: args.file_path,
+      caption: args.caption,
+      filename: args.filename || path.basename(args.file_path),
+      chatJid,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: `Media send requested: ${args.filename || path.basename(args.file_path)}` }],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

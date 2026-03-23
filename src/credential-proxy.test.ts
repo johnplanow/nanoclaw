@@ -49,12 +49,15 @@ describe('credential-proxy', () => {
   let proxyPort: number;
   let upstreamPort: number;
   let lastUpstreamHeaders: http.IncomingHttpHeaders;
+  let lastUpstreamPath: string;
 
   beforeEach(async () => {
     lastUpstreamHeaders = {};
+    lastUpstreamPath = '';
 
     upstreamServer = http.createServer((req, res) => {
       lastUpstreamHeaders = { ...req.headers };
+      lastUpstreamPath = req.url || '';
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -166,6 +169,57 @@ describe('credential-proxy', () => {
     // custom keep-alive and transfer-encoding must not be forwarded.
     expect(lastUpstreamHeaders['keep-alive']).toBeUndefined();
     expect(lastUpstreamHeaders['transfer-encoding']).toBeUndefined();
+  });
+
+  it('OAuth mode converts x-api-key placeholder to Bearer auth for third-party clients', async () => {
+    proxyPort = await startProxy({
+      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+    });
+
+    // Third-party client (e.g. LangChain ChatAnthropic) sends x-api-key: placeholder
+    // with no Authorization header. Proxy converts to OAuth Bearer auth.
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['authorization']).toBe(
+      'Bearer real-oauth-token',
+    );
+    expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
+    expect(lastUpstreamHeaders['anthropic-beta']).toBe('claude-code-20250219,oauth-2025-04-20');
+  });
+
+  it('OAuth mode appends beta flag when client already sends anthropic-beta', async () => {
+    proxyPort = await startProxy({
+      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'placeholder',
+          'anthropic-beta': 'prompt-caching-2024-07-31',
+        },
+      },
+      '{}',
+    );
+
+    expect(lastUpstreamHeaders['anthropic-beta']).toBe(
+      'prompt-caching-2024-07-31,claude-code-20250219,oauth-2025-04-20',
+    );
   });
 
   it('returns 502 when upstream is unreachable', async () => {

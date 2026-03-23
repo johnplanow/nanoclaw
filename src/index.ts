@@ -5,6 +5,7 @@ import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
+  MAX_MEDIA_SIZE,
   POLL_INTERVAL,
   TIMEZONE,
   TRIGGER_PATTERN,
@@ -44,6 +45,13 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import {
+  getExtFromMime,
+  getMediaRef,
+  isMediaDownloaded,
+  saveMediaFile,
+  writeDownloadError,
+} from './media.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   restoreRemoteControl,
@@ -645,6 +653,46 @@ async function main(): Promise<void> {
       for (const group of Object.values(registeredGroups)) {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
+    },
+    sendMedia: async (jid, filePath, options) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendMedia) {
+        await channel.sendMedia(jid, filePath, options);
+      } else {
+        // Fallback: send filename as text if channel doesn't support media
+        const name = options?.filename || path.basename(filePath);
+        await channel.sendMessage(jid, `[File: ${name}]`);
+      }
+    },
+    downloadMedia: async (groupFolder, mediaId) => {
+      if (isMediaDownloaded(groupFolder, mediaId)) return;
+
+      const ref = getMediaRef(groupFolder, mediaId);
+      if (!ref) {
+        throw new Error(`No media ref found for ${mediaId}`);
+      }
+
+      // Find the channel that owns this media
+      const channel = channels.find((c) => c.name === ref.channel);
+      if (!channel?.downloadMedia) {
+        throw new Error(
+          `Channel "${ref.channel}" does not support media download`,
+        );
+      }
+
+      const buffer = await channel.downloadMedia(ref.ref);
+      if (buffer.length > MAX_MEDIA_SIZE) {
+        writeDownloadError(
+          groupFolder,
+          mediaId,
+          `File too large: ${buffer.length} bytes (max ${MAX_MEDIA_SIZE})`,
+        );
+        throw new Error(`Media exceeds size limit: ${buffer.length} bytes`);
+      }
+
+      const ext = getExtFromMime(ref.mimetype);
+      saveMediaFile(groupFolder, mediaId, buffer, ext);
     },
   });
   queue.setProcessMessagesFn(processGroupMessages);

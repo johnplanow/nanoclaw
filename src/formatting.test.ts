@@ -121,6 +121,100 @@ describe('formatMessages', () => {
     expect(result).toContain('PM');
     expect(result).toContain('<context timezone="America/New_York" />');
   });
+
+  it('includes attachment XML for messages with attachments', () => {
+    const result = formatMessages(
+      [
+        makeMsg({
+          content: 'Check this photo',
+          attachments: [
+            {
+              id: 'slack:media:123-abc',
+              filename: 'photo.jpg',
+              mimetype: 'image/jpeg',
+              size: 45000,
+            },
+          ],
+        }),
+      ],
+      TZ,
+    );
+    expect(result).toContain('Check this photo');
+    expect(result).toContain(
+      '<attachment id="slack:media:123-abc" name="photo.jpg" type="image/jpeg" size="45000" />',
+    );
+  });
+
+  it('includes multiple attachments', () => {
+    const result = formatMessages(
+      [
+        makeMsg({
+          content: 'Files',
+          attachments: [
+            {
+              id: 'slack:media:1-a',
+              filename: 'a.txt',
+              mimetype: 'text/plain',
+              size: 100,
+            },
+            {
+              id: 'slack:media:2-b',
+              filename: 'b.png',
+              mimetype: 'image/png',
+              size: 50000,
+            },
+          ],
+        }),
+      ],
+      TZ,
+    );
+    expect(result).toContain('name="a.txt"');
+    expect(result).toContain('name="b.png"');
+  });
+
+  it('omits size attribute when size is undefined', () => {
+    const result = formatMessages(
+      [
+        makeMsg({
+          content: '[File]',
+          attachments: [
+            {
+              id: 'slack:media:1-a',
+              filename: 'doc.pdf',
+              mimetype: 'application/pdf',
+            },
+          ],
+        }),
+      ],
+      TZ,
+    );
+    expect(result).toContain('type="application/pdf"');
+    expect(result).not.toContain('size=');
+  });
+
+  it('escapes special characters in attachment attributes', () => {
+    const result = formatMessages(
+      [
+        makeMsg({
+          content: 'test',
+          attachments: [
+            {
+              id: 'slack:media:1-a',
+              filename: 'file "with" quotes.txt',
+              mimetype: 'text/plain',
+            },
+          ],
+        }),
+      ],
+      TZ,
+    );
+    expect(result).toContain('name="file &quot;with&quot; quotes.txt"');
+  });
+
+  it('does not add attachment XML when attachments is undefined', () => {
+    const result = formatMessages([makeMsg({ content: 'plain text' })], TZ);
+    expect(result).not.toContain('<attachment');
+  });
 });
 
 // --- TRIGGER_PATTERN ---

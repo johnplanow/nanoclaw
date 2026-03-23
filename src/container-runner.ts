@@ -14,6 +14,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  MEDIA_DIR,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -172,6 +173,15 @@ function buildVolumeMounts(
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
+    readonly: false,
+  });
+
+  // Per-group media directory (writable so agents can create files to send)
+  const groupMediaDir = path.join(MEDIA_DIR, group.folder);
+  fs.mkdirSync(groupMediaDir, { recursive: true });
+  mounts.push({
+    hostPath: groupMediaDir,
+    containerPath: '/workspace/media',
     readonly: false,
   });
 

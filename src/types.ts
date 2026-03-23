@@ -42,6 +42,19 @@ export interface RegisteredGroup {
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
 }
 
+export interface MediaAttachment {
+  id: string; // URI: "{channel}:media:{uid}" e.g. "slack:media:1709123456789-abc123"
+  filename: string;
+  mimetype: string;
+  size?: number;
+}
+
+export interface MediaSendOptions {
+  caption?: string;
+  filename?: string;
+  mimetype?: string;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -51,6 +64,7 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  attachments?: MediaAttachment[];
 }
 
 export interface ScheduledTask {
@@ -90,6 +104,9 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: media support. Channels that support media implement these.
+  sendMedia?(jid: string, filePath: string, options?: MediaSendOptions): Promise<void>;
+  downloadMedia?(ref: unknown): Promise<Buffer>;
 }
 
 // Callback type that channels use to deliver inbound messages
