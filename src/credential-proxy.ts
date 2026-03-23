@@ -83,10 +83,7 @@ export function startCredentialProxy(
             if (oauthToken) {
               headers['authorization'] = `Bearer ${oauthToken}`;
             }
-          } else if (
-            headers['x-api-key'] === PLACEHOLDER_KEY &&
-            oauthToken
-          ) {
+          } else if (headers['x-api-key'] === PLACEHOLDER_KEY && oauthToken) {
             // Third-party client path (e.g. LangChain ChatAnthropic):
             // Convert x-api-key auth to OAuth Bearer auth.
             delete headers['x-api-key'];

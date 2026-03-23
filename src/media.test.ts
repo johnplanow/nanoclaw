@@ -99,7 +99,9 @@ describe('generateMediaId', () => {
   });
 
   it('produces unique IDs', () => {
-    const ids = new Set(Array.from({ length: 10 }, () => generateMediaId('test')));
+    const ids = new Set(
+      Array.from({ length: 10 }, () => generateMediaId('test')),
+    );
     expect(ids.size).toBe(10);
   });
 });
@@ -142,15 +144,21 @@ describe('resolveContainerMediaPath', () => {
 
   it('returns null for unrecognized prefixes', () => {
     expect(resolveContainerMediaPath('/etc/passwd', 'main')).toBeNull();
-    expect(resolveContainerMediaPath('/workspace/other/file.txt', 'main')).toBeNull();
+    expect(
+      resolveContainerMediaPath('/workspace/other/file.txt', 'main'),
+    ).toBeNull();
   });
 
   it('rejects path traversal in media path', () => {
-    expect(resolveContainerMediaPath('/workspace/media/../../../etc/passwd', 'main')).toBeNull();
+    expect(
+      resolveContainerMediaPath('/workspace/media/../../../etc/passwd', 'main'),
+    ).toBeNull();
   });
 
   it('rejects path traversal in group path', () => {
-    expect(resolveContainerMediaPath('/workspace/group/../../../etc/passwd', 'main')).toBeNull();
+    expect(
+      resolveContainerMediaPath('/workspace/group/../../../etc/passwd', 'main'),
+    ).toBeNull();
   });
 });
 

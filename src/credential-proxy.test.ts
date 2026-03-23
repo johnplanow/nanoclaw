@@ -195,7 +195,9 @@ describe('credential-proxy', () => {
       'Bearer real-oauth-token',
     );
     expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
-    expect(lastUpstreamHeaders['anthropic-beta']).toBe('claude-code-20250219,oauth-2025-04-20');
+    expect(lastUpstreamHeaders['anthropic-beta']).toBe(
+      'claude-code-20250219,oauth-2025-04-20',
+    );
   });
 
   it('OAuth mode appends beta flag when client already sends anthropic-beta', async () => {

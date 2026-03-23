@@ -87,11 +87,19 @@ vi.mock('../media.js', () => ({
   processInboundMedia: vi.fn(
     (
       _groupFolder: string,
-      opts: { mimetype: string; filename?: string; size?: number; caption?: string; mediaType?: string },
+      opts: {
+        mimetype: string;
+        filename?: string;
+        size?: number;
+        caption?: string;
+        mediaType?: string;
+      },
     ) => {
       if (opts.size != null && opts.size > 52428800) return null;
       return {
-        content: opts.caption || `[${(opts.mediaType || 'File').charAt(0).toUpperCase() + (opts.mediaType || 'file').slice(1)}]`,
+        content:
+          opts.caption ||
+          `[${(opts.mediaType || 'File').charAt(0).toUpperCase() + (opts.mediaType || 'file').slice(1)}]`,
         attachments: [
           {
             id: `slack:media:test-${Date.now()}`,
@@ -906,8 +914,7 @@ describe('SlackChannel', () => {
       mimetype: 'application/pdf',
       size: 12345,
       url_private: 'https://files.slack.com/files-pri/T00/report.pdf',
-      url_private_download:
-        'https://files.slack.com/files-tmb/T00/report.pdf',
+      url_private_download: 'https://files.slack.com/files-tmb/T00/report.pdf',
     };
 
     it('processes file-only messages (no text)', async () => {

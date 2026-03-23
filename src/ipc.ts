@@ -501,10 +501,7 @@ export async function processTaskIpc(
       if (data.containerFilePath && data.chatJid) {
         // Authorization: same pattern as text messages
         const targetGroup = registeredGroups[data.chatJid];
-        if (
-          isMain ||
-          (targetGroup && targetGroup.folder === sourceGroup)
-        ) {
+        if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
           const hostPath = resolveContainerMediaPath(
             data.containerFilePath,
             sourceGroup,

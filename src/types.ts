@@ -105,7 +105,11 @@ export interface Channel {
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
   // Optional: media support. Channels that support media implement these.
-  sendMedia?(jid: string, filePath: string, options?: MediaSendOptions): Promise<void>;
+  sendMedia?(
+    jid: string,
+    filePath: string,
+    options?: MediaSendOptions,
+  ): Promise<void>;
   downloadMedia?(ref: unknown): Promise<Buffer>;
 }
 
