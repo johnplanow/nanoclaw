@@ -56,6 +56,10 @@ vi.mock('@slack/bolt', () => ({
           user: { real_name: 'Alice Smith', name: 'alice' },
         }),
       },
+      reactions: {
+        add: vi.fn().mockResolvedValue({ ok: true }),
+        remove: vi.fn().mockResolvedValue({ ok: true }),
+      },
     };
 
     constructor(opts: any) {
@@ -814,25 +818,124 @@ describe('SlackChannel', () => {
     });
   });
 
-  // --- setTyping ---
+  // --- setTyping (reaction-based indicator) ---
 
   describe('setTyping', () => {
-    it('resolves without error (no-op)', async () => {
+    it('no-ops when no inbound message ts is tracked', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
+      const app = appRef.current;
 
-      // Should not throw — Slack has no bot typing indicator API
-      await expect(
-        channel.setTyping('slack:C0123456789', true),
-      ).resolves.toBeUndefined();
+      await channel.setTyping('slack:C0123456789', true);
+
+      expect(app.client.reactions.add).not.toHaveBeenCalled();
+      expect(app.client.reactions.remove).not.toHaveBeenCalled();
     });
 
-    it('accepts false without error', async () => {
+    it('adds eyes reaction when isTyping=true after a message', async () => {
       const opts = createTestOpts();
+      opts.registeredGroups = () => ({
+        'slack:C0123456789': {
+          name: 'test',
+          folder: 'test',
+          trigger: '@Jonesy',
+          added_at: '',
+        },
+      });
       const channel = new SlackChannel(opts);
+      const app = appRef.current;
 
+      // Simulate an inbound message to populate lastInboundTs
+      const handler = app.eventHandlers.get('message')!;
+      await handler({
+        event: {
+          type: 'message',
+          channel: 'C0123456789',
+          channel_type: 'channel',
+          user: 'U_ALICE',
+          text: '@Jonesy hello',
+          ts: '1234567890.000100',
+        },
+      });
+
+      await channel.setTyping('slack:C0123456789', true);
+
+      expect(app.client.reactions.add).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1234567890.000100',
+        name: 'eyes',
+      });
+    });
+
+    it('removes eyes reaction when isTyping=false', async () => {
+      const opts = createTestOpts();
+      opts.registeredGroups = () => ({
+        'slack:C0123456789': {
+          name: 'test',
+          folder: 'test',
+          trigger: '@Jonesy',
+          added_at: '',
+        },
+      });
+      const channel = new SlackChannel(opts);
+      const app = appRef.current;
+
+      // Simulate inbound message
+      const handler = app.eventHandlers.get('message')!;
+      await handler({
+        event: {
+          type: 'message',
+          channel: 'C0123456789',
+          channel_type: 'channel',
+          user: 'U_ALICE',
+          text: 'hello',
+          ts: '1234567890.000200',
+        },
+      });
+
+      await channel.setTyping('slack:C0123456789', false);
+
+      expect(app.client.reactions.remove).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        timestamp: '1234567890.000200',
+        name: 'eyes',
+      });
+    });
+
+    it('silently handles reaction API errors', async () => {
+      const opts = createTestOpts();
+      opts.registeredGroups = () => ({
+        'slack:C0123456789': {
+          name: 'test',
+          folder: 'test',
+          trigger: '@Jonesy',
+          added_at: '',
+        },
+      });
+      const channel = new SlackChannel(opts);
+      const app = appRef.current;
+
+      // Simulate inbound message
+      const handler = app.eventHandlers.get('message')!;
+      await handler({
+        event: {
+          type: 'message',
+          channel: 'C0123456789',
+          channel_type: 'channel',
+          user: 'U_ALICE',
+          text: 'hi',
+          ts: '1234567890.000300',
+        },
+      });
+
+      // Make reactions.add fail (e.g. already_reacted)
+      app.client.reactions.add.mockRejectedValueOnce(
+        new Error('already_reacted'),
+      );
+
+      // Should not throw
       await expect(
-        channel.setTyping('slack:C0123456789', false),
+        channel.setTyping('slack:C0123456789', true),
       ).resolves.toBeUndefined();
     });
   });

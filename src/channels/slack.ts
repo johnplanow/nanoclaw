@@ -49,6 +49,10 @@ export class SlackChannel implements Channel {
   private flushing = false;
   private userNameCache = new Map<string, string>();
 
+  // Track the latest inbound (non-bot) message ts per channel so
+  // setTyping can add/remove a reaction as a "thinking" indicator.
+  private lastInboundTs = new Map<string, string>();
+
   private opts: SlackChannelOpts;
 
   constructor(opts: SlackChannelOpts) {
@@ -152,6 +156,11 @@ export class SlackChannel implements Channel {
           : undefined;
       }
 
+      // Track latest inbound message ts for reaction-based typing indicator
+      if (!isBotMessage) {
+        this.lastInboundTs.set(jid, msg.ts);
+      }
+
       this.opts.onMessage(jid, {
         id: msg.ts,
         chat_jid: jid,
@@ -236,11 +245,35 @@ export class SlackChannel implements Channel {
     await this.app.stop();
   }
 
-  // Slack does not expose a typing indicator API for bots.
-  // This no-op satisfies the Channel interface so the orchestrator
-  // doesn't need channel-specific branching.
-  async setTyping(_jid: string, _isTyping: boolean): Promise<void> {
-    // no-op: Slack Bot API has no typing indicator endpoint
+  // Slack doesn't support typing indicators for bots, so we use emoji
+  // reactions as a lightweight "thinking" signal instead. When the agent
+  // starts processing, we add an 👀 reaction to the triggering message;
+  // when it finishes, we remove it.
+  private static readonly THINKING_EMOJI = 'eyes';
+
+  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    const channelId = jid.replace(/^slack:/, '');
+    const messageTs = this.lastInboundTs.get(jid);
+    if (!messageTs) return;
+
+    try {
+      if (isTyping) {
+        await this.app.client.reactions.add({
+          channel: channelId,
+          timestamp: messageTs,
+          name: SlackChannel.THINKING_EMOJI,
+        });
+      } else {
+        await this.app.client.reactions.remove({
+          channel: channelId,
+          timestamp: messageTs,
+          name: SlackChannel.THINKING_EMOJI,
+        });
+      }
+    } catch (err) {
+      // Silently ignore — reaction may already exist or be already removed
+      logger.debug({ jid, isTyping, err }, 'Slack reaction indicator failed');
+    }
   }
 
   /**
