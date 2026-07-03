@@ -49,15 +49,12 @@ describe('credential-proxy', () => {
   let proxyPort: number;
   let upstreamPort: number;
   let lastUpstreamHeaders: http.IncomingHttpHeaders;
-  let lastUpstreamPath: string;
 
   beforeEach(async () => {
     lastUpstreamHeaders = {};
-    lastUpstreamPath = '';
 
     upstreamServer = http.createServer((req, res) => {
       lastUpstreamHeaders = { ...req.headers };
-      lastUpstreamPath = req.url || '';
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
