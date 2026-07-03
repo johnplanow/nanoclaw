@@ -3,68 +3,63 @@
 **Why:** v2 does not read v1's `store/messages.db` / `registered_groups`. New model:
 central `data/v2.db` (agent_groups, messaging_groups, users, user_roles,
 messaging_group_agents, container_configs) + per-session DB pairs under
-`data/v2-sessions/<agent_group>/<session>/` (inbound.db host-written, outbound.db
-container-written). v2.1.0+ also refuses to boot without `data/upgrade-state.json`.
+`data/v2-sessions/<agent_group>/<session>/`.
 
-**Decision (user-confirmed):** run upstream's migrate driver from the upgrade
-worktree pointed at the live v1 root — NOT the sibling-clone bash flow. The driver
-reads the v1 tree strictly read-only.
-
-## Procedure (in the worktree, Stage 4)
-
-1. Fetch the driver from the `migrate/v1-to-v2` branch (fetch-and-copy, same spirit
-   as registry branches — do not merge the branch):
+**Route (updated 2026-07-03 during upgrade):** v2.1.24 main ships the migration
+driver in-tree — `migrate-v2.sh` + `setup/migrate-v2/*.ts` (newer than the
+`migrate/v1-to-v2` branch this guide originally referenced). The bash wrapper
+needs a TTY, but the individual step scripts are headless, idempotent, and
+strictly read-only on the v1 tree. Run them directly:
 
 ```bash
-git fetch upstream migrate/v1-to-v2
-for f in setup/migrate.ts setup/migrate/detect-v1.ts setup/migrate/extract-v1.ts \
-         setup/migrate/guide-compose.ts setup/migrate/jid.ts \
-         setup/migrate/owner-propose.ts setup/migrate/seed-v2.ts; do
-  git show upstream/migrate/v1-to-v2:$f > $f
-done
-# plus the package.json script entry "migrate:v1-to-v2" (add manually, one line)
+V1=/home/jplanow/code/jplanow/nanoclaw   # the v1 root
+pnpm exec tsx setup/migrate-v2/env.ts      "$V1"   # v1 .env keys → v2 .env (append-only)
+pnpm exec tsx setup/migrate-v2/db.ts       "$V1"   # registered_groups → agent/messaging groups + wiring
+pnpm exec tsx setup/migrate-v2/groups.ts   "$V1"   # groups/* → CLAUDE.local.md + files (no overwrite)
+pnpm exec tsx setup/migrate-v2/sessions.ts "$V1"   # sessions + .claude history + continuation ids
+pnpm exec tsx setup/migrate-v2/tasks.ts    "$V1"   # active scheduled_tasks → v2 task messages
+pnpm exec tsx setup/migrate-v2/channel-auth.ts "$V1" slack  # slack env keys
 ```
 
-   Note: the branch's merge base with main is older (d2f5304) — if the driver files
-   assume APIs that moved by 2.1.24, reconcile minimally and flag anything unclear.
+Order matters: `db.ts` must precede `sessions.ts`/`tasks.ts`. All write into the
+CURRENT working directory's `data/`, `groups/`, `.env`.
 
-2. Run it (worktree = v2 root, live tree = v1 root):
+**Owner/user seeding is NOT done by these scripts** — the `/migrate-from-v1`
+skill (on v2 main) handles users/user_roles after cutover. Run it (or seed the
+owner via `ncl users create` + `ncl roles grant`) before expecting admin commands
+to work.
 
-```bash
-cd "$WORKTREE" && pnpm run migrate:v1-to-v2 -- --v1-root /home/jplanow/code/jplanow/nanoclaw
-```
+## Dry-run results (worktree, 2026-07-03)
 
-   What it does: extracts `store/messages.db`, non-secret `.env` keys, and
-   `~/.config/nanoclaw/*` into `.nanoclaw-migrations/v1-data/*.json`; seeds v2 DB —
-   `registered_groups.folder` → `agent_groups` (deduped), `jid` → `messaging_groups`,
-   `trigger_pattern`/`requires_trigger` → `engage_mode`/`engage_pattern`; infers or
-   prompts for an owner → `users`/`user_roles(owner)`; copies `CLAUDE.md` →
-   `CLAUDE.local.md` per group. **Scheduled tasks are NOT migrated** — list them
-   from v1 before cutover (`sqlite3 store/messages.db 'select * from scheduled_tasks'`)
-   and recreate after.
+All steps ran clean against the live v1 root:
+- env: 3 keys copied (CLAUDE_CODE_OAUTH_TOKEN, SLACK_APP_TOKEN, SLACK_BOT_TOKEN)
+- db: 5/5 registered_groups → 5 agent_groups + 5 messaging_groups, engage_mode
+  `pattern` / `.` (faithful to v1 requires_trigger=0 = respond-to-all)
+- groups: 7 folders, 6 CLAUDE.md → CLAUDE.local.md, 201 files
+- sessions: 5 sessions created, 282 files (incl. Claude Code JSONL continuation ids)
+- tasks: 1/1 active task migrated (ai-news-daily cron `45 5 * * *`)
+- channel-auth slack: env keys already present; `SLACK_SIGNING_SECRET` flagged
+  missing — NOT needed (Socket Mode via SLACK_APP_TOKEN)
 
-3. Interactive prompts (owner inference) — surface to the user, don't guess.
+## At cutover (authoritative run)
 
-4. Stamp the upgrade marker so v2 boots:
-```bash
-cd "$WORKTREE" && pnpm exec tsx scripts/upgrade-state.ts set   # check exact usage on v2 main
-```
+Re-run the same steps in the LIVE tree after the code swap, with `V1=.`
+(the live tree holds both the v1 data and the v2 code at that point; every step
+is no-overwrite/reuse-existing, verified in the dry run). This picks up any
+messages/state that arrived after the dry run. Then:
+
+1. Stamp the upgrade marker (v2.1.0+ boot requirement; the tripwire refuses to
+   start otherwise): `pnpm exec tsx scripts/upgrade-state.ts set` (verify exact
+   CLI usage in that script first).
+2. Run `/migrate-from-v1` for owner/user seeding + CLAUDE.local.md review.
+3. Recreate/verify the migrated scheduled task fires (check
+   `data/v2-sessions/.../inbound.db` messages_in kind='task').
 
 ## Data-safety invariants
 
-- v1 `store/`, `data/`, `groups/`, `.env` are READ-ONLY inputs throughout.
-- The seeded v2 data lands under the WORKTREE's `data/` while validating. At cutover
-  (worktree → main swap), the seeded `data/v2.db`, `data/v2-sessions/`, and
-  `data/upgrade-state.json` must be carried into the live tree's `data/` (additive —
-  v1 files in `data/` stay as rollback).
-  ⚠️ The swap step (`git reset --hard` + worktree remove) only moves git-tracked
-  code — copy the seeded data explicitly before removing the worktree.
+- v1 `store/`, `data/sessions/`, `groups/`, `.env` are READ-ONLY inputs
+  (verified in script source: no writes to the v1 path anywhere).
+- v2 state lands in `data/v2.db`, `data/v2-sessions/`, `groups/<f>/CLAUDE.local.md`.
+  v1 files stay in place as rollback.
 - Rollback for the data layer: `~/nanoclaw-backups/pre-v2-20260703/`
   (runtime-state.tar.gz + messages.db snapshot + both systemd units).
-
-## Groups inventory at migration time
-
-Enumerate v1 groups just before seeding (`sqlite3 store/messages.db
-'select jid, folder, trigger_pattern, requires_trigger from registered_groups'`)
-and diff against seeded v2 `messaging_groups`/`agent_groups` afterwards — every v1
-group must be accounted for (including `slack_gpt-researcher`).
