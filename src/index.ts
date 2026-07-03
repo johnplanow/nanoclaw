@@ -60,6 +60,7 @@ import './modules/index.js';
 import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
+import { startCredentialProxy } from './credential-proxy.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import {
@@ -170,6 +171,13 @@ async function main(): Promise<void> {
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
+
+  // 8. Fork: standalone credential proxy for the GPT Researcher sidecar.
+  // Agent containers use OneCLI — this serves host-network third-party
+  // clients only (127.0.0.1). See .nanoclaw-migrations/02-credential-proxy.md.
+  await startCredentialProxy(
+    parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10),
+  );
 
   log.info('NanoClaw running');
 }

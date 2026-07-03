@@ -25,6 +25,10 @@ import { getAskQuestionRender } from '../db/sessions.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 
+// Fork: inbound attachment size cap. Upstream downloads eagerly with no
+// limit; keep v1's MAX_MEDIA_SIZE env var (default 50MB) as the guard.
+const MAX_ATTACHMENT_SIZE = parseInt(process.env.MAX_MEDIA_SIZE || '52428800', 10);
+
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
   startGatewayListener?(
@@ -170,10 +174,29 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           width: (att as unknown as Record<string, unknown>).width,
           height: (att as unknown as Record<string, unknown>).height,
         };
-        if (att.fetchData) {
+        // Fork: cap inbound attachment downloads (v1 MAX_MEDIA_SIZE behavior).
+        // Oversized attachments keep their metadata entry but carry no data,
+        // so no inbox file is written.
+        if (typeof att.size === 'number' && att.size > MAX_ATTACHMENT_SIZE) {
+          log.warn('Attachment skipped (exceeds size limit)', {
+            type: att.type,
+            name: att.name,
+            size: att.size,
+            limit: MAX_ATTACHMENT_SIZE,
+          });
+        } else if (att.fetchData) {
           try {
             const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
+            if (buffer.length > MAX_ATTACHMENT_SIZE) {
+              log.warn('Attachment skipped (exceeds size limit)', {
+                type: att.type,
+                name: att.name,
+                size: buffer.length,
+                limit: MAX_ATTACHMENT_SIZE,
+              });
+            } else {
+              entry.data = buffer.toString('base64');
+            }
           } catch (err) {
             log.warn('Failed to download attachment', { type: att.type, err });
           }
