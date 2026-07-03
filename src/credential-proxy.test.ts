@@ -23,20 +23,17 @@ function makeRequest(
   headers: http.IncomingHttpHeaders;
 }> {
   return new Promise((resolve, reject) => {
-    const req = http.request(
-      { ...options, hostname: '127.0.0.1', port },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          resolve({
-            statusCode: res.statusCode!,
-            body: Buffer.concat(chunks).toString(),
-            headers: res.headers,
-          });
+    const req = http.request({ ...options, hostname: '127.0.0.1', port }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        resolve({
+          statusCode: res.statusCode!,
+          body: Buffer.concat(chunks).toString(),
+          headers: res.headers,
         });
-      },
-    );
+      });
+    });
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -58,9 +55,7 @@ describe('credential-proxy', () => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
-    await new Promise<void>((resolve) =>
-      upstreamServer.listen(0, '127.0.0.1', resolve),
-    );
+    await new Promise<void>((resolve) => upstreamServer.listen(0, '127.0.0.1', resolve));
     upstreamPort = (upstreamServer.address() as AddressInfo).port;
   });
 
@@ -115,9 +110,7 @@ describe('credential-proxy', () => {
       '{}',
     );
 
-    expect(lastUpstreamHeaders['authorization']).toBe(
-      'Bearer real-oauth-token',
-    );
+    expect(lastUpstreamHeaders['authorization']).toBe('Bearer real-oauth-token');
   });
 
   it('OAuth mode does not inject Authorization when container omits it', async () => {
@@ -188,13 +181,9 @@ describe('credential-proxy', () => {
       '{}',
     );
 
-    expect(lastUpstreamHeaders['authorization']).toBe(
-      'Bearer real-oauth-token',
-    );
+    expect(lastUpstreamHeaders['authorization']).toBe('Bearer real-oauth-token');
     expect(lastUpstreamHeaders['x-api-key']).toBeUndefined();
-    expect(lastUpstreamHeaders['anthropic-beta']).toBe(
-      'claude-code-20250219,oauth-2025-04-20',
-    );
+    expect(lastUpstreamHeaders['anthropic-beta']).toBe('claude-code-20250219,oauth-2025-04-20');
   });
 
   it('OAuth mode appends beta flag when client already sends anthropic-beta', async () => {

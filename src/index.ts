@@ -175,9 +175,7 @@ async function main(): Promise<void> {
   // 8. Fork: standalone credential proxy for the GPT Researcher sidecar.
   // Agent containers use OneCLI — this serves host-network third-party
   // clients only (127.0.0.1). See .nanoclaw-migrations/02-credential-proxy.md.
-  await startCredentialProxy(
-    parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10),
-  );
+  await startCredentialProxy(parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10));
 
   log.info('NanoClaw running');
 }
