@@ -1,15 +1,11 @@
 name: Sync upstream & merge-forward skill branches
 
+# Manual-only until the v1→v2 upstream update lands. Upstream moved to a new
+# major line (v2, registry branches `channels`/`providers`); auto-merging
+# upstream/main would attempt that migration unsupervised. Run /update-nanoclaw
+# locally instead, then re-enable the schedule/push/dispatch triggers once the
+# fork is on v2.
 on:
-  # Triggered by upstream repo via repository_dispatch
-  repository_dispatch:
-    types: [upstream-main-updated]
-  # Fallback: run on a schedule in case dispatch isn't configured
-  schedule:
-    - cron: '0 */6 * * *'  # every 6 hours
-  # Also run when fork's main is pushed directly
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
