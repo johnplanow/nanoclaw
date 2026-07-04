@@ -84,18 +84,31 @@ OneCLI Agent Vault (installed 2026-07-03, gateway at `~/.onecli`, ONECLI_URL in
 passthrough — upstream's `use-native-credential-proxy` skill is env-threading
 only, and OneCLI does header rewriting without the OAuth impersonation.
 
-## 4. GPT Researcher sidecar (tool install)
+## 4. GPT Researcher sidecar (DEMOTED to optional fallback, 2026-07-03)
+
+As of the researcher pipeline v2 overhaul, the research core is the **native
+orchestrator-worker pipeline** (parallel Task subagents, digest synthesis,
+mandatory citation verification) defined in
+`groups/slack_gpt-researcher/CLAUDE.local.md` + the mounted research skill.
+The sidecar remains running only as an optional broad-crawl fallback; the eval
+harness (`groups/slack_gpt-researcher/evals/`) will render the retirement
+verdict. **If retired, §3's proxy and the NO_PROXY exemption (§2b) can retire
+with it** — they exist solely for this sidecar.
 
 - `container/gpt-researcher/Dockerfile` (additive dir) — pre-installs
   `langchain-ollama`/`langchain-anthropic`; patches ChatAnthropic construction to
-  strip the `temperature` param (rejected by Opus 4.7+); the patch asserts its
-  target line so the image build fails loudly if upstream gpt-researcher changes.
-- **External state (not in repo):** docker container `gpt-researcher` (systemd
-  user unit) with `--network host`; LLM model IDs pinned in the unit (the `opus`
-  alias does not work there); a Node.js WebSocket helper (`research.mjs`) lives
-  in the per-session container skill dirs (v2: under `data/v2-sessions/…/.claude-shared/`
-  after migration — verify location if the research skill misbehaves).
-- Depends on §3's proxy at `http://localhost:3001`.
+  strip the `temperature` param; the patch asserts its target line so the image
+  build fails loudly if upstream changes. NOTE: image is built from Docker Hub
+  `:latest` which is stale (Mar 2025 / gpt-researcher 0.12.8; GitHub is at
+  v3.5.1). A source-build upgrade was scoped and deliberately NOT done —
+  don't invest further unless evals say the sidecar stays.
+- **External state (not in repo):** systemd user unit `gpt-researcher`
+  (`--network host`); unit env updated 2026-07-03: models pinned to
+  `claude-opus-4-8`/`claude-haiku-4-5`, `RETRIEVER=tavily,duckduckgo` (arxiv
+  removed — its parallel queries caused 429 storms; academic retrieval moved
+  to the agent's native pass). WebSocket helper `research.mjs` lives in
+  `data/v2-sessions/…/.claude-shared/skills/research/`.
+- Depends on §3's proxy at `http://172.17.0.1:3001`.
 
 ## 5. Agent model ('opus' alias) — now pure config, no code
 
