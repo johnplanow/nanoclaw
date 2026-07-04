@@ -5,6 +5,12 @@ Base: d768a0484355414f7ce7481db5ee237e18a8a1d6 (upstream v1 line, ~1.2.21)
 HEAD at generation: 0794acc45e8e9dbf767499b4378d9b6a6ba8d476
 Upstream: aecad864e6371cb2a77ceaff8a38f9c4a8b71774 (upstream/main, v2.1.24)
 
+> **MIGRATION COMPLETED 2026-07-03.** Cutover done; fork main now sits on the v2
+> line (upstream aecad86 + fork commits). v1 line preserved at
+> `backup/pre-migrate-53e91f4-20260703-170313`. Current customization inventory:
+> `docs/CUSTOMIZATIONS.md`. This guide is kept as the migration record and as the
+> replay recipe for the next major.
+
 Tier 3 migration. Sections live in this directory:
 
 | File | Covers |

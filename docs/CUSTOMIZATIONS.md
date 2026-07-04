@@ -1,137 +1,131 @@
 # Fork Customizations Manifest
 
 This fork (`johnplanow/nanoclaw`) carries local customizations on top of upstream
-(`qwibitai/nanoclaw`). This manifest inventories every fork-local change per the
-upstream extension-architecture guarantees (additive, documented, reversible —
-see <https://docs.nanoclaw.dev/extend/overview>), so upstream updates can be merged
-with full knowledge of what is ours, why it exists, and what can be dropped if
-upstream ships an equivalent.
+(`qwibitai/nanoclaw`). This manifest inventories every fork-local change so
+upstream updates can be taken with full knowledge of what is ours, why it exists,
+and what can be dropped if upstream ships an equivalent.
 
-**Fork baseline at last audit (2026-07-03):** merge base `d768a04` (upstream v1
-line, ~1.2.21). Upstream `main` is now on the **v2 line (2.1.24)**, ~1,555 commits
-ahead, with a new extension architecture: registry branches (`channels`,
-`providers`), per-channel registration tests, REMOVE.md reversibility, and a
-`skills` column in container config. Upstream also ships `migrate/v1-to-v2` and a
-`skill/migrate-nanoclaw` branch — use those (via `/update-nanoclaw`) when taking
-the update.
+**Fork baseline (since 2026-07-03 v2 migration):** upstream v2 line, rebased onto
+`aecad86` (v2.1.24) via the intent-based `/migrate-nanoclaw` flow — NOT a merge.
+The fork is now a handful of commits ahead of upstream/main; same-line merges work
+again. The full migration record (decisions, dry-run results, cutover steps) lives
+in `.nanoclaw-migrations/`. The pre-migration v1 line is preserved at branch
+`backup/pre-migrate-53e91f4-20260703-170313` / tag `pre-migrate-53e91f4-20260703-170313`.
 
 ---
 
-## 1. Slack channel (channel install)
+## 1. Slack channel (installed from `channels` registry branch)
 
-**Category:** channel install. Origin: `qwibitai/nanoclaw-slack` (merged from the
-`slack` remote — predates the fetch-and-copy registry pattern).
+**Category:** channel install per v2's fetch-and-copy model (`/add-slack`) —
+`src/channels/slack.ts` + `slack-registration.test.ts` copied from
+`upstream/channels`, barrel import in `src/channels/index.ts`,
+`@chat-adapter/slack@4.29.0` pinned.
 
-- `src/channels/slack.ts` — self-registering Socket Mode channel module
-- `src/channels/slack.test.ts` — tests (56)
-- `src/channels/index.ts` — barrel import line `import './slack.js';`
-- `.env.example` — `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`
-- `package.json` — dependency `@slack/bolt ^4.6.0`
-- `.claude/skills/add-slack/SKILL.md` — modified: added `reactions:write` OAuth scope
+**Fork-only enhancement (re-ported from v1):**
+- **Emoji-reaction "thinking" indicator** — Slack's Chat SDK `startTyping` only
+  works in assistant threads, so `slack.ts` overrides the bridge's `setTyping` to
+  add an 👀 reaction to the triggering message, removed on reply delivery or
+  after a 15s staleness timeout. Needs the `reactions:write` scope (already
+  granted on the Slack app). Implementation is the fork block at the bottom of
+  `src/channels/slack.ts`; porting notes in `.nanoclaw-migrations/01-slack.md`.
 
-**Fork-only enhancements (not in nanoclaw-slack):**
-- **Attachment support** — handles `msg.files[]` for images, text, PDFs, code
-  snippets; lazy download; text-inline fast path for small text files (commit `99179ba`)
-- **Emoji-reaction "thinking" indicator** — Slack has no bot typing API, so
-  `setTyping` adds/removes an 👀 reaction on the triggering message; requires the
-  `reactions:write` scope (commit `795dc02`)
+**Dropped from v1 (superseded by v2):** the @slack/bolt implementation and the
+explicit `msg.files[]` processing — v2's `chat-sdk-bridge` handles inbound
+attachments natively (verified live: image analysis works).
 
-**Removal:** delete `slack.ts`/`slack.test.ts`, drop the barrel import line, remove
-`@slack/bolt`, remove the two env vars.
+**Update note:** when `upstream/channels` changes `src/channels/slack.ts`, do NOT
+blindly re-copy — re-apply the 👀 block after. The fork-sync CI opens an issue on
+drift (`.github/workflows/fork-sync-skills.yml`).
 
-**v2 conflict notes:** upstream's `channels` registry branch ships its own
-`src/channels/slack.ts` + `slack-registration.test.ts` on a new adapter API
-(`adapter.ts`, `channel-registry.ts` replace v1 `registry.ts`). Expect to
-**reinstall Slack from the v2 registry branch** and re-port the two fork
-enhancements (attachments may be covered by v2's native attachment support —
-verify before porting).
+## 2. Media: two small patches on v2's native attachment stack
 
-## 2. Media infrastructure (cross-cutting core change)
+The entire v1 media stack (`src/media.ts`, media refs, `get_media`/`send_media`
+MCP tools, `<attachment>` XML, `attachments` DB column) was **dropped** —
+superseded by v2's session inbox/outbox + native `send_file` tool. Two gaps ported:
 
-Per-group media handling for channel attachments (commit `99179ba`).
+- **Inbound attachment size cap** — `src/channels/chat-sdk-bridge.ts`: v2 has no
+  inbound size limit at all (eager unbounded downloads). Fork adds
+  `MAX_ATTACHMENT_SIZE` from env `MAX_MEDIA_SIZE` (default 50MB), checked
+  pre-download (`att.size`) and post-download (`buffer.length`). Oversized
+  attachments keep their metadata entry but carry no data. Marked with
+  `// Fork:` comments. **Conflict hotspot** — this file is upstream core.
+- **poppler-utils** in `container/Dockerfile` (PDF reading via pdftotext) —
+  one line in the apt-get list.
 
-New files (additive):
-- `src/media.ts` — MIME helpers, media-ref storage, `processInboundMedia()`, path-traversal guards
-- `src/media.test.ts`, `src/formatting.test.ts` (attachment formatting coverage)
-- `container/agent-runner/src/ipc-mcp-stdio.ts` — `get_media`/`send_media` MCP tools (stdio server)
+## 3. Credential proxy (sidecar-only standalone service)
 
-Modified core files (**merge-conflict hotspots**):
-- `src/db.ts` — schema migration adding `attachments` column
-- `src/router.ts` — emits `<attachment>` XML elements
-- `src/ipc.ts` — `get_media`/`send_media` task processing
-- `src/index.ts` — media wiring
-- `src/config.ts` — `MEDIA_DIR`, `MAX_MEDIA_SIZE` (env `MAX_MEDIA_SIZE`, default 50MB)
-- `src/container-runner.ts` — mounts `/workspace/media` per group
-- `src/types.ts` — attachment types
-- `container/Dockerfile` — adds `poppler-utils` for PDF reading
+`src/credential-proxy.ts` + `src/credential-proxy.test.ts` — fork-local files,
+started from `src/index.ts` `main()` step 8 on port 3001 (env
+`CREDENTIAL_PROXY_PORT`), bound to 127.0.0.1.
 
-**Removal:** revert the modified-file hunks of `99179ba`; delete the new files;
-drop the `attachments` column (or leave it — additive schema).
+**Purpose:** OAuth-impersonation passthrough so third-party Anthropic clients
+(the GPT Researcher sidecar's langchain `ChatAnthropic`) ride the Claude
+subscription: converts `x-api-key: placeholder` requests to Bearer auth with
+claude-code beta flags, CLI user-agent/x-app headers, and the required
+"You are Claude Code" system-prompt prefix.
 
-**v2 conflict notes:** upstream v2 has native attachment infrastructure
-(`src/attachment-naming.ts`, `src/attachment-safety.ts`) and `src/db` is now a
-directory. **Prefer upstream's implementation** during the update; carry over only
-gaps (e.g. `send_media` outbound flow) after comparing.
-
-## 3. Credential proxy OAuth passthrough
-
-`src/credential-proxy.ts` + `src/credential-proxy.test.ts` (commit `99179ba`): in
-OAuth mode, converts third-party `x-api-key: placeholder` requests to Bearer auth
-with `claude-code` beta flags and system-prompt injection, so any Anthropic API
-client (e.g. GPT Researcher's langchain) rides the Claude subscription.
-
-**v2 conflict notes:** upstream has a `skill/native-credential-proxy` branch —
-compare during the update; ours may be superseded.
+**NOT in the agent-container path:** v2 agent containers get credentials via the
+OneCLI Agent Vault (installed 2026-07-03, gateway at `~/.onecli`, ONECLI_URL in
+`.env`, Anthropic secret vaulted). Nothing upstream supersedes the third-party
+passthrough — upstream's `use-native-credential-proxy` skill is env-threading
+only, and OneCLI does header rewriting without the OAuth impersonation.
 
 ## 4. GPT Researcher sidecar (tool install)
 
-Commits `99179ba`, `c285213`.
-
 - `container/gpt-researcher/Dockerfile` (additive dir) — pre-installs
   `langchain-ollama`/`langchain-anthropic`; patches ChatAnthropic construction to
-  strip the `temperature` param (rejected by Opus 4.7+ with a 400); the patch
-  asserts its target line so the image build fails loudly if upstream
-  gpt-researcher changes.
-- **External state (not in repo):** systemd user unit running the sidecar with
-  `--network host`; LLM model IDs are pinned in the unit (the `opus` alias does
-  not work there); a Node.js WebSocket helper lives in the untracked
-  `groups/slack_gpt-researcher/` group folder.
+  strip the `temperature` param (rejected by Opus 4.7+); the patch asserts its
+  target line so the image build fails loudly if upstream gpt-researcher changes.
+- **External state (not in repo):** docker container `gpt-researcher` (systemd
+  user unit) with `--network host`; LLM model IDs pinned in the unit (the `opus`
+  alias does not work there); a Node.js WebSocket helper (`research.mjs`) lives
+  in the per-session container skill dirs (v2: under `data/v2-sessions/…/.claude-shared/`
+  after migration — verify location if the research skill misbehaves).
+- Depends on §3's proxy at `http://localhost:3001`.
 
-## 5. Agent model tracking (`opus` alias)
+## 5. Agent model ('opus' alias) — now pure config, no code
 
-Commit `c25a818`:
-- `container/agent-runner/src/index.ts` — model set to the `opus` alias
-- `container/agent-runner/package.json` — `@anthropic-ai/claude-agent-sdk ^0.3.150`
-  (the bundled CLI version determines which Opus the alias resolves to)
+v2 stores model/effort per agent group in the `container_configs` DB table and
+passes them verbatim to the Agent SDK. All five groups are set to `model=opus`
+via `ncl groups config update --id <ag> --model opus`. No code patch; nothing to
+re-apply on update. (v1 hardcoded this in agent-runner — dropped.)
 
 ## 6. Fork-sync CI workflow (fork infrastructure)
 
-`.github/workflows/fork-sync-skills.yml` — fork-only file. Originally auto-merged
-`upstream/main` every 6 h and merged main forward into `origin/skill/*` branches.
-**Gated to `workflow_dispatch` only (2026-07-03)** so the v1→v2 update can't happen
-unsupervised; re-enable triggers after the fork is on v2 (and re-point the
-skill-branch logic at the v2 registry-branch model).
+`.github/workflows/fork-sync-skills.yml` — fork-only file, re-enabled
+(schedule every 6h + workflow_dispatch) after the v2 migration. v2 rework:
+pnpm-based build/test gate on upstream merges; the v1 merge-forward loop over
+`origin/skill/*` is replaced by a `channels`-branch drift watch that opens an
+issue when upstream changes an installed adapter file (currently
+`src/channels/slack.ts`). Old `origin/skill/*` branches are frozen v1 history.
 
 ## 7. Misc
 
-- `.gitignore` — fork additions: `.nanoclaw/`, `agents-sdk-docs`, `_bmad/`,
-  `.claude/skills/bmad-*/` (BMAD tooling is local-only, intentionally untracked)
-- `.claude/skills/get-qodo-rules`, `qodo-pr-resolver`, `x-integration` — tracked at
-  merge base (upstream v1); not fork-local
-- `repo-tokens/badge.svg` — regenerated locally; noise, take upstream's on conflict
+- `.gitignore` — fork additions: `_bmad/`, `.claude/skills/bmad-*/` (BMAD tooling
+  is local-only, intentionally untracked).
+- `.claude/skills/x-integration/` — carried from v1 (dropped upstream in v2).
+- `.claude/skills/migrate-nanoclaw/` — upstream's own version (ships on v2 main).
+- `.nanoclaw-migrations/` — the migration guide; keep, it documents this manifest's
+  provenance and is the replay recipe for the next major migration.
+- `docs/CUSTOMIZATIONS.md` — this file.
 
 ---
 
-## Update-readiness checklist (verified 2026-07-03)
+## v2 operational notes (post-migration, 2026-07-03)
 
-- Working tree clean, `main` == `origin/main`
-- `upstream` remote → `qwibitai/nanoclaw` (fetched + pruned)
-- Build green, 309 tests green, lint 0 errors (90 warnings, matching upstream baseline)
-- package.json regressions from the old `slack/main` merge repaired (version,
-  lint scripts, eslint devDeps)
-- Auto-merge CI disabled (manual dispatch only)
-
-**Taking the update:** run `/update-nanoclaw`. It is a v1→v2 major: expect the
-merge path to be heavy; upstream's `skill/migrate-nanoclaw` / `migrate/v1-to-v2`
-are the intended route. Decide per section above what to drop (superseded by v2)
-vs re-port.
+- **Services:** existing units kept — `nanoclaw.service` (ExecStart
+  `node dist/index.js`, matches v2) and `gpt-researcher`. v2's own setup would
+  have created a slugged unit (`nanoclaw-v2-61d30892`); not adopted.
+- **Agent image:** `nanoclaw-agent-v2-61d30892:latest` (slug of the project
+  root). Rebuild: `./container/build.sh` (prune buildkit builder first —
+  `--no-cache` alone does not invalidate COPY).
+- **OneCLI:** gateway (docker compose `onecli` + `onecli-postgres-1`) on
+  `http://172.17.0.1:10254`; CLI at `~/.local/bin/onecli`; Anthropic subscription
+  token vaulted as secret "Anthropic". Upgrades: `docs/onecli-upgrades.md`.
+- **Owner:** `slack:U0ANEA7PYEM` (global owner in `user_roles`).
+- **Data:** v2 state in `data/v2.db` + `data/v2-sessions/`; v1 data
+  (`store/messages.db`, `data/sessions/`, groups CLAUDE.md) left in place
+  read-only as rollback, plus `~/nanoclaw-backups/pre-v2-20260703/`.
+- **Package manager:** pnpm (corepack), Node ≥ 20; container agent-runner is Bun.
+- **Updates:** `/update-nanoclaw` for normal same-line updates; the intent-based
+  `/migrate-nanoclaw` + `.nanoclaw-migrations/` guide for the next major.
