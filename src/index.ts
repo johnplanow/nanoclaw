@@ -60,7 +60,7 @@ import './modules/index.js';
 import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
-import { startCredentialProxy } from './credential-proxy.js';
+import { startCredentialProxy, detectProxyBindHost } from './credential-proxy.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import {
@@ -174,8 +174,13 @@ async function main(): Promise<void> {
 
   // 8. Fork: standalone credential proxy for the GPT Researcher sidecar.
   // Agent containers use OneCLI — this serves host-network third-party
-  // clients only (127.0.0.1). See .nanoclaw-migrations/02-credential-proxy.md.
-  await startCredentialProxy(parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10));
+  // clients only. Binds to the docker0 bridge IP on bare-metal Linux (the
+  // sidecar calls http://172.17.0.1:3001; ufw restricts the port to
+  // 172.17.0.0/16). See .nanoclaw-migrations/02-credential-proxy.md.
+  await startCredentialProxy(
+    parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10),
+    detectProxyBindHost(),
+  );
 
   log.info('NanoClaw running');
 }

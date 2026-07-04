@@ -19,6 +19,8 @@
 import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
+import fs from 'fs';
+import os from 'os';
 
 import { readEnvFile } from './env.js';
 import { log } from './log.js';
@@ -32,6 +34,24 @@ export interface ProxyConfig {
 const PLACEHOLDER_KEY = 'placeholder';
 const OAUTH_BETA_FLAGS = 'claude-code-20250219,oauth-2025-04-20';
 const OAUTH_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/**
+ * Where the proxy listens (v1 behavior, ported):
+ *   macOS / WSL (Docker Desktop): 127.0.0.1 — the VM routes to loopback.
+ *   Bare-metal Linux: the docker0 bridge IP (e.g. 172.17.0.1) so host-network
+ *   sidecars and bridge containers can reach it, but the LAN cannot
+ *   (ufw additionally restricts port 3001 to 172.17.0.0/16).
+ * Override with CREDENTIAL_PROXY_HOST.
+ */
+export function detectProxyBindHost(): string {
+  if (process.env.CREDENTIAL_PROXY_HOST) return process.env.CREDENTIAL_PROXY_HOST;
+  if (os.platform() === 'darwin') return '127.0.0.1';
+  // WSL uses Docker Desktop (same VM routing as macOS) — loopback is correct.
+  if (fs.existsSync('/proc/sys/fs/binfmt_misc/WSLInterop')) return '127.0.0.1';
+  const docker0 = os.networkInterfaces()['docker0'];
+  const ipv4 = docker0?.find((a) => a.family === 'IPv4');
+  return ipv4?.address ?? '0.0.0.0';
+}
 
 export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<Server> {
   const secrets = readEnvFile([

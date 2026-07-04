@@ -51,9 +51,10 @@ await startCredentialProxy(parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001',
 ```
 
   (Adapt to the actual v2 startup structure and `startCredentialProxy` signature —
-  the v1 signature took `(port, ...)`; check the copied file. If v2's index.ts has a
-  services/bootstrap registry, register there instead. Bind to 127.0.0.1 — the
-  sidecar is host-network; containers do NOT use this proxy in v2.)
+  the v1 signature took `(port, host)`. CORRECTED at cutover: bind to the
+  docker0 bridge IP via detectProxyBindHost() — the sidecar calls
+  http://172.17.0.1:3001, NOT loopback; 127.0.0.1 broke it. ufw restricts the
+  port to 172.17.0.0/16. Containers do NOT use this proxy in v2.)
 
 - The file reads env at call time: `CLAUDE_CODE_OAUTH_TOKEN` or
   `ANTHROPIC_AUTH_TOKEN` (OAuth mode), `ANTHROPIC_API_KEY` (api-key mode) via
