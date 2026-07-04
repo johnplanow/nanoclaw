@@ -111,9 +111,9 @@ issue when upstream changes an installed adapter file (currently
 
 ## v2 operational notes (post-migration, 2026-07-03)
 
-- **Services:** existing units kept — `nanoclaw.service` (ExecStart
-  `node dist/index.js`, matches v2) and `gpt-researcher`. v2's own setup would
-  have created a slugged unit (`nanoclaw-v2-61d30892`); not adopted.
+- **Services:** `nanoclaw.service` kept (ExecStart `node dist/index.js`,
+  matches v2; v2's own setup would have created a slugged unit — not adopted).
+  `gpt-researcher.service` retired 2026-07-03 (stopped + disabled, see §2b–4).
 - **Agent image:** `nanoclaw-agent-v2-61d30892:latest` (slug of the project
   root). Rebuild: `./container/build.sh` (prune buildkit builder first —
   `--no-cache` alone does not invalidate COPY).
