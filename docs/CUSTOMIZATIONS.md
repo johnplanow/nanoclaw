@@ -52,63 +52,34 @@ superseded by v2's session inbox/outbox + native `send_file` tool. Two gaps port
 - **poppler-utils** in `container/Dockerfile` (PDF reading via pdftotext) —
   one line in the apt-get list.
 
-## 2b. NO_PROXY exemption for host-local sidecars
+## 2b–4. RETIRED (2026-07-03): sidecar, credential proxy, NO_PROXY patch
 
-`src/container-runner.ts` (`buildContainerArgs`, right after the OneCLI apply
-block, marked `// Fork:`): injects
-`NO_PROXY=host.docker.internal,localhost,127.0.0.1` into agent containers.
-OneCLI routes all container HTTP(S) through its egress proxy (port 10255) and
-sets no NO_PROXY; the proxy answers with an empty reply for host-side services,
-which broke the gpt-researcher group's WebSocket to the sidecar on
-`host.docker.internal:8000` (discovered at cutover 2026-07-03). Direct-to-host
-traffic needs no vault credentials; `api.anthropic.com` still routes via the
-proxy. **Conflict hotspot** — upstream core file. Note: if upstream's egress
-lockdown is ever enabled (`ensureEgressNetwork`), direct host egress is blocked
-by design and this exemption stops working — revisit then.
+The GPT-Researcher sidecar and everything that existed to serve it were
+retired the same day as the pipeline v2 overhaul, after an instrumented
+engine A/B (eval q6) showed the sidecar contributed **zero verifiable
+sources** — full evidence in
+`groups/slack_gpt-researcher/evals/results/2026-07-03-pipeline-v2-initial.md`.
+The research core is now the native orchestrator-worker pipeline (no extra
+infrastructure).
 
-## 3. Credential proxy (sidecar-only standalone service)
+Removed from code (restorable from git history, pre-retirement tree at tag
+`pre-migrate-53e91f4-20260703-170313` + commits through `6c7bc47`):
+- `src/credential-proxy.ts` + test + `src/index.ts` startup wiring (the OAuth
+  passthrough existed solely for the sidecar's LangChain client)
+- the `NO_PROXY` exemption block in `src/container-runner.ts` (existed solely
+  so containers could reach the sidecar)
+- `container/gpt-researcher/` (Dockerfile with the temperature-strip patch)
 
-`src/credential-proxy.ts` + `src/credential-proxy.test.ts` — fork-local files,
-started from `src/index.ts` `main()` step 8 on port 3001 (env
-`CREDENTIAL_PROXY_PORT`), bound to 127.0.0.1.
+External state left in place, inert:
+- systemd user unit `gpt-researcher.service` — stopped + disabled, file kept
+  on disk for easy resurrection
+- docker image `nanoclaw-gpt-researcher:latest` — still tagged locally
+- ufw rules for 3001/8000 from 172.17.0.0/16 — now unused; optional cleanup
+- Ollama `nomic-embed-text` model — was only used by the sidecar; Ollama
+  itself stays (other consumers)
 
-**Purpose:** OAuth-impersonation passthrough so third-party Anthropic clients
-(the GPT Researcher sidecar's langchain `ChatAnthropic`) ride the Claude
-subscription: converts `x-api-key: placeholder` requests to Bearer auth with
-claude-code beta flags, CLI user-agent/x-app headers, and the required
-"You are Claude Code" system-prompt prefix.
-
-**NOT in the agent-container path:** v2 agent containers get credentials via the
-OneCLI Agent Vault (installed 2026-07-03, gateway at `~/.onecli`, ONECLI_URL in
-`.env`, Anthropic secret vaulted). Nothing upstream supersedes the third-party
-passthrough — upstream's `use-native-credential-proxy` skill is env-threading
-only, and OneCLI does header rewriting without the OAuth impersonation.
-
-## 4. GPT Researcher sidecar (DEMOTED to optional fallback, 2026-07-03)
-
-As of the researcher pipeline v2 overhaul, the research core is the **native
-orchestrator-worker pipeline** (parallel Task subagents, digest synthesis,
-mandatory citation verification) defined in
-`groups/slack_gpt-researcher/CLAUDE.local.md` + the mounted research skill.
-The sidecar remains running only as an optional broad-crawl fallback; the eval
-harness (`groups/slack_gpt-researcher/evals/`) will render the retirement
-verdict. **If retired, §3's proxy and the NO_PROXY exemption (§2b) can retire
-with it** — they exist solely for this sidecar.
-
-- `container/gpt-researcher/Dockerfile` (additive dir) — pre-installs
-  `langchain-ollama`/`langchain-anthropic`; patches ChatAnthropic construction to
-  strip the `temperature` param; the patch asserts its target line so the image
-  build fails loudly if upstream changes. NOTE: image is built from Docker Hub
-  `:latest` which is stale (Mar 2025 / gpt-researcher 0.12.8; GitHub is at
-  v3.5.1). A source-build upgrade was scoped and deliberately NOT done —
-  don't invest further unless evals say the sidecar stays.
-- **External state (not in repo):** systemd user unit `gpt-researcher`
-  (`--network host`); unit env updated 2026-07-03: models pinned to
-  `claude-opus-4-8`/`claude-haiku-4-5`, `RETRIEVER=tavily,duckduckgo` (arxiv
-  removed — its parallel queries caused 429 storms; academic retrieval moved
-  to the agent's native pass). WebSocket helper `research.mjs` lives in
-  `data/v2-sessions/…/.claude-shared/skills/research/`.
-- Depends on §3's proxy at `http://172.17.0.1:3001`.
+`src/index.ts` and `src/container-runner.ts` are now **pristine upstream** —
+two fewer merge-conflict hotspots on future updates.
 
 ## 5. Agent model ('opus' alias) — now pure config, no code
 
