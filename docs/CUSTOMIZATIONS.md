@@ -52,7 +52,22 @@ superseded by v2's session inbox/outbox + native `send_file` tool. Two gaps port
 - **poppler-utils** in `container/Dockerfile` (PDF reading via pdftotext) —
   one line in the apt-get list.
 
-## 2b–4. RETIRED (2026-07-03): sidecar, credential proxy, NO_PROXY patch
+## 3. NO_PROXY exemption for host-local backends (REINSTATED 2026-07-04)
+
+`src/container-runner.ts` (after the OneCLI apply block, `// Fork:`): injects
+`NO_PROXY=host.docker.internal,localhost,127.0.0.1` into agent containers.
+Agent groups depend on host-side backends — RSSBrew :8001 (ai-news-daily),
+Qdrant :6333 (movie-recs), RSSHub :1200, Ollama :11434 — and through the
+OneCLI egress proxy those connections time out or arrive with a rewritten
+Host header (RSSBrew's Django ALLOWED_HOSTS then 400s). History: added at v2
+cutover for the gpt-researcher sidecar; removed 2026-07-03 with the sidecar
+retirement on the mistaken belief it was sidecar-only; broke the daily news
+brief the next morning; reinstated with a do-not-remove warning comment.
+**Conflict hotspot** — upstream core file. Related external fix: RSSBrew's
+`DEPLOYMENT_URL` in `~/code/jplanow/news-agg/docker-compose.yml` now includes
+`host.docker.internal,172.17.0.1`.
+
+## 4. RETIRED (2026-07-03): gpt-researcher sidecar + credential proxy
 
 The GPT-Researcher sidecar and everything that existed to serve it were
 retired the same day as the pipeline v2 overhaul, after an instrumented
@@ -66,8 +81,6 @@ Removed from code (restorable from git history, pre-retirement tree at tag
 `pre-migrate-53e91f4-20260703-170313` + commits through `6c7bc47`):
 - `src/credential-proxy.ts` + test + `src/index.ts` startup wiring (the OAuth
   passthrough existed solely for the sidecar's LangChain client)
-- the `NO_PROXY` exemption block in `src/container-runner.ts` (existed solely
-  so containers could reach the sidecar)
 - `container/gpt-researcher/` (Dockerfile with the temperature-strip patch)
 
 External state left in place, inert:
@@ -78,8 +91,9 @@ External state left in place, inert:
 - Ollama `nomic-embed-text` model — was only used by the sidecar; Ollama
   itself stays (other consumers)
 
-`src/index.ts` and `src/container-runner.ts` are now **pristine upstream** —
-two fewer merge-conflict hotspots on future updates.
+`src/index.ts` is now **pristine upstream**. (The NO_PROXY block was also
+removed here at first, then reinstated next morning — see §3; it was never
+sidecar-only.)
 
 ## 5. Agent model ('opus' alias) — now pure config, no code
 
