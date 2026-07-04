@@ -498,6 +498,14 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
+  // Fork: exempt host-local destinations from the OneCLI egress proxy.
+  // Host-side sidecars (GPT Researcher on host.docker.internal:8000) are
+  // unreachable through the proxy — it answers with an empty reply — and
+  // OneCLI sets no NO_PROXY of its own. Direct-to-host traffic needs no
+  // vault credentials, and api.anthropic.com still routes via the proxy.
+  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1');
+  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1');
+
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
 

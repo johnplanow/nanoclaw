@@ -52,6 +52,20 @@ superseded by v2's session inbox/outbox + native `send_file` tool. Two gaps port
 - **poppler-utils** in `container/Dockerfile` (PDF reading via pdftotext) —
   one line in the apt-get list.
 
+## 2b. NO_PROXY exemption for host-local sidecars
+
+`src/container-runner.ts` (`buildContainerArgs`, right after the OneCLI apply
+block, marked `// Fork:`): injects
+`NO_PROXY=host.docker.internal,localhost,127.0.0.1` into agent containers.
+OneCLI routes all container HTTP(S) through its egress proxy (port 10255) and
+sets no NO_PROXY; the proxy answers with an empty reply for host-side services,
+which broke the gpt-researcher group's WebSocket to the sidecar on
+`host.docker.internal:8000` (discovered at cutover 2026-07-03). Direct-to-host
+traffic needs no vault credentials; `api.anthropic.com` still routes via the
+proxy. **Conflict hotspot** — upstream core file. Note: if upstream's egress
+lockdown is ever enabled (`ensureEgressNetwork`), direct host egress is blocked
+by design and this exemption stops working — revisit then.
+
 ## 3. Credential proxy (sidecar-only standalone service)
 
 `src/credential-proxy.ts` + `src/credential-proxy.test.ts` — fork-local files,
