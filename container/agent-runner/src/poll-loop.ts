@@ -247,6 +247,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        batchHasUserChat(keep),
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -323,6 +324,17 @@ interface QueryResult {
   continuation?: string;
 }
 
+/**
+ * True when a batch contains real user-facing chat traffic (not operator
+ * on_wake rows, scheduled tasks, or system messages). Such a turn owes the
+ * user a <message> reply — see reply enforcement in processQuery.
+ */
+function batchHasUserChat(messages: { kind: string; id: string }[]): boolean {
+  return messages.some(
+    (m) => (m.kind === 'chat' || m.kind === 'chat-sdk') && !m.id.startsWith('restart-'),
+  );
+}
+
 export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
@@ -331,10 +343,19 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  initialHasUserChat = false,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Reply enforcement (2026-07-19 incident: agent repeatedly consumed user
+  // messages, then ended turns with <internal> "nothing further to send" —
+  // the wrapping nudge below never fired because stripInternalTags left an
+  // empty scratchpad). Once a user chat message enters the turn, the turn
+  // owes a sent <message> block; an <internal>-only result gets one
+  // corrective nudge before we give up loudly.
+  let replyNudged = false;
+  let pendingUserReply = initialHasUserChat;
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -418,6 +439,8 @@ export async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        replyNudged = false;
+        if (batchHasUserChat(keep)) pendingUserReply = true;
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -497,12 +520,18 @@ export async function processQuery(
             });
             archivePrompts.shift();
           } else {
+            if (sent > 0) pendingUserReply = false;
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            // <internal>-only results leave scratchpad empty, so hasUnwrapped
+            // misses them; if this turn consumed user chat, silence is still
+            // not acceptable — nudge once, then give up loudly.
+            const needsReplyNudge =
+              !willRetryWrapping && pendingUserReply && sent === 0 && !replyNudged;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped ? 'undelivered' : 'completed',
+              status: hasUnwrapped || (pendingUserReply && sent === 0) ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -514,10 +543,23 @@ export async function processQuery(
                   `Your destinations: ${names}. ` +
                   `Please re-send your response with the correct wrapping.</system>`,
               );
+            } else if (needsReplyNudge) {
+              replyNudged = true;
+              const names = getAllDestinations().map((d) => d.name).join(', ');
+              log(`Reply enforcement: user message(s) consumed but nothing was sent — nudging agent`);
+              query.push(
+                `<system>This turn processed user message(s) but nothing was sent to the user. ` +
+                  `An <internal> note is not a reply, and narrating a response without a block does not send it. ` +
+                  `Every user message requires a user-facing response — even a one-line acknowledgment of what you did. ` +
+                  `Send it NOW inside <message to="name">...</message>. Your destinations: ${names}.</system>`,
+              );
+            } else if (pendingUserReply && sent === 0) {
+              log(`ERROR: reply enforcement failed — user message(s) remain unanswered after nudge`);
             }
-            // The wrapping-retry result answers the SAME user prompt — keep it
-            // queued so the retry archives against it, not the nudge text.
-            if (!willRetryWrapping) archivePrompts.shift();
+            // A wrapping-retry or reply-nudge result answers the SAME user
+            // prompt — keep it queued so the retry archives against it, not
+            // the nudge text.
+            if (!willRetryWrapping && !needsReplyNudge) archivePrompts.shift();
           }
         } else {
           archivePrompts.shift();
