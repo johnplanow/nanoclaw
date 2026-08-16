@@ -541,6 +541,27 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
+  // Fork: exempt host-local destinations from the OneCLI egress proxy.
+  // Agent groups depend on host-side backends reached via
+  // host.docker.internal — RSSBrew :8001 (ai-news-daily), Qdrant :6333
+  // (movie-recs), RSSHub :1200, Ollama :11434. Through the proxy these
+  // either time out (empty reply) or arrive with a rewritten Host header
+  // that Django-style ALLOWED_HOSTS checks reject (observed 2026-07-04:
+  // RSSBrew 400 DisallowedHost on every client-set Host value).
+  // Direct-to-host traffic needs no vault credentials; api.anthropic.com
+  // still routes via the proxy. Removed once (2026-07-03) on the mistaken
+  // belief only the retired gpt-researcher sidecar used it — it broke the
+  // news agent the next morning. Do not remove again without checking every
+  // group's host-local backends.
+  //
+  // This ASSUMES egress lockdown stays OFF (NANOCLAW_EGRESS_LOCKDOWN unset).
+  // With lockdown ON, containers run on an --internal network where
+  // host.docker.internal is remapped to the gateway itself, so NO_PROXY is
+  // moot AND host-local backends become unreachable. Keep lockdown off for
+  // this install (see egress-lockdown.ts, ensureEgressNetwork above).
+  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1');
+  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1');
+
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
 

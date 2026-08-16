@@ -1,0 +1,169 @@
+name: Sync upstream & watch registry-branch drift
+
+# v2 model (since 2026-07-03 migration): the fork carries a few commits on top
+# of upstream/main; channel code is plain files fetch-and-copied from the
+# upstream `channels` registry branch (never merged). So this workflow:
+#   1. merges upstream/main into fork main (same-line merges, gated on
+#      build+test with pnpm),
+#   2. watches the `channels` branch for drift in the installed Slack adapter
+#      and opens an issue suggesting a /add-slack refresh when it changes.
+# The old v1 merge-forward loop over origin/skill/* is gone — those branches
+# are frozen v1 history (see backup/pre-migrate-*).
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: true
+
+jobs:
+  sync-and-watch:
+    if: github.repository != 'qwibitai/nanoclaw'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with upstream main
+        id: sync
+        run: |
+          git remote add upstream https://github.com/qwibitai/nanoclaw.git
+          git fetch upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream main."
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge upstream/main --no-edit; then
+            echo "::error::Failed to merge upstream/main into fork main — conflicts detected"
+            git merge --abort
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pnpm install --frozen-lockfile
+          if ! pnpm run build; then
+            echo "::error::Build failed after merging upstream/main"
+            git reset --hard "origin/main"
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! pnpm test; then
+            echo "::error::Tests failed after merging upstream/main"
+            git reset --hard "origin/main"
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push origin main
+          echo "synced=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check channels-branch drift for installed adapters
+        id: drift
+        run: |
+          git fetch upstream channels
+
+          DRIFTED=""
+          # Installed channel adapters (fetch-and-copied from upstream/channels).
+          # Add a line per installed channel.
+          for FILE in src/channels/slack.ts; do
+            [ -f "$FILE" ] || continue
+            # Our copy carries fork customizations, so compare the upstream
+            # blob against the last-synced marker instead of our working copy:
+            # drift = upstream/channels changed the file since we last checked.
+            UPSTREAM_HASH=$(git rev-parse "upstream/channels:$FILE" 2>/dev/null || echo missing)
+            MARKER=".github/channel-sync/$(echo "$FILE" | tr '/' '_').hash"
+            LAST=$(cat "$MARKER" 2>/dev/null || echo none)
+            if [ "$UPSTREAM_HASH" != "$LAST" ]; then
+              DRIFTED="$DRIFTED $FILE"
+              mkdir -p .github/channel-sync
+              echo "$UPSTREAM_HASH" > "$MARKER"
+            fi
+          done
+
+          if [ -n "$DRIFTED" ]; then
+            git add .github/channel-sync
+            git commit -m "chore: record channels-branch blob hashes for drift watch"
+            git push origin main
+          fi
+          echo "drifted=$DRIFTED" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue for upstream sync failure
+        if: steps.sync.outputs.sync_failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Upstream sync failed — merge conflict or build failure`,
+              body: [
+                'The automated sync with `qwibitai/nanoclaw` main failed.',
+                '',
+                'To resolve manually:',
+                '```bash',
+                'git fetch upstream main',
+                'git merge upstream/main',
+                '# resolve conflicts',
+                'pnpm install && pnpm run build && pnpm test',
+                'git push',
+                '```',
+              ].join('\n'),
+              labels: ['upstream-sync']
+            });
+
+      - name: Open issue for channel adapter drift
+        if: steps.drift.outputs.drifted != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drifted = '${{ steps.drift.outputs.drifted }}'.trim().split(/\s+/);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Upstream channels branch updated: ${drifted.join(', ')}`,
+              body: [
+                'The upstream `channels` registry branch changed these installed adapter files:',
+                '',
+                ...drifted.map(f => `- \`${f}\``),
+                '',
+                'The fork copy carries local customizations (e.g. the 👀 thinking indicator in slack.ts),',
+                'so do NOT blindly overwrite. Re-run the install skill and re-apply customizations:',
+                '',
+                '1. Review upstream changes: `git fetch upstream channels && git diff upstream/channels -- <file>`',
+                '2. Re-run `/add-slack` (fetch-and-copy) or hand-merge the upstream changes',
+                '3. Re-apply fork customizations per `.nanoclaw-migrations/01-slack.md`',
+              ].join('\n'),
+              labels: ['skill-maintenance']
+            });

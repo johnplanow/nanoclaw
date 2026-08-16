@@ -466,6 +466,35 @@ describe('error result with no <message> envelope', () => {
   });
 });
 
+describe('reply enforcement on user-message turns', () => {
+  it('nudges when a user-chat turn ends with only an <internal> note', async () => {
+    // <internal>-only output leaves an empty scratchpad, so the wrapping
+    // nudge never fires — reply enforcement must catch it instead
+    // (2026-07-19 silent-drop incident).
+    const { query, pushes } = makeResultQuery({
+      type: 'result',
+      text: '<internal>Reply already delivered. Nothing further to send.</internal>',
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain('nothing was sent to the user');
+  });
+
+  it('does not nudge an <internal>-only result on a non-user turn', async () => {
+    const { query, pushes } = makeResultQuery({
+      type: 'result',
+      text: '<internal>housekeeping only</internal>',
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, false);
+
+    expect(pushes).toHaveLength(0);
+  });
+});
+
 describe('isCorruptionError', () => {
   it('matches the Docker Desktop macOS torn-read symptom', () => {
     expect(isCorruptionError('database disk image is malformed')).toBe(true);
