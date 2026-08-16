@@ -5,12 +5,16 @@ This fork (`johnplanow/nanoclaw`) carries local customizations on top of upstrea
 upstream updates can be taken with full knowledge of what is ours, why it exists,
 and what can be dropped if upstream ships an equivalent.
 
-**Fork baseline (since 2026-07-03 v2 migration):** upstream v2 line, rebased onto
-`aecad86` (v2.1.24) via the intent-based `/migrate-nanoclaw` flow — NOT a merge.
-The fork is now a handful of commits ahead of upstream/main; same-line merges work
-again. The full migration record (decisions, dry-run results, cutover steps) lives
-in `.nanoclaw-migrations/`. The pre-migration v1 line is preserved at branch
-`backup/pre-migrate-53e91f4-20260703-170313` / tag `pre-migrate-53e91f4-20260703-170313`.
+**Fork baseline (since 2026-08-16 v2.2.0 upgrade):** upstream v2.2.0 (`cde0e39`)
+with the fork customizations reapplied on top via the intent-based
+`/migrate-nanoclaw` flow — NOT a merge. The fork is exactly 1 commit ahead of
+upstream/main (`2e91be09`, the reapply commit). The full record (reapply order,
+breaking-change matrix, cutover steps) lives in `.nanoclaw-migrations/` —
+see [08-v2.2-upgrade.md](../.nanoclaw-migrations/08-v2.2-upgrade.md). The
+pre-upgrade v2.1.24 line is preserved at branch/tag
+`pre-migrate-bbd91967-20260816-120631`; central DB + sessions backup at
+`~/nanoclaw-backups/pre-v2.2-20260816-122030`. (Prior 2026-07-03 v1→v2
+migration: pre-migration v1 line at `backup/pre-migrate-53e91f4-20260703-170313`.)
 
 ---
 
