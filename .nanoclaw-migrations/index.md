@@ -10,6 +10,9 @@ Upstream: aecad864e6371cb2a77ceaff8a38f9c4a8b71774 (upstream/main, v2.1.24)
 > `backup/pre-migrate-53e91f4-20260703-170313`. Current customization inventory:
 > `docs/CUSTOMIZATIONS.md`. This guide is kept as the migration record and as the
 > replay recipe for the next major.
+>
+> **NEXT UPGRADE IN PROGRESS (2026-08-16):** v2.1.24 → v2.2.0 via intent-based
+> re-apply. Ordered checklist + breaking-change matrix: [08-v2.2-upgrade.md](08-v2.2-upgrade.md).
 
 Tier 3 migration. Sections live in this directory:
 

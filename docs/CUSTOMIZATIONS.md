@@ -111,7 +111,36 @@ pnpm-based build/test gate on upstream merges; the v1 merge-forward loop over
 issue when upstream changes an installed adapter file (currently
 `src/channels/slack.ts`). Old `origin/skill/*` branches are frozen v1 history.
 
-## 7. Misc
+## 7. Agent-runner: reply enforcement on user-message turns
+
+`container/agent-runner/src/poll-loop.ts` (+ `poll-loop.test.ts`), commit
+`ffa20a6` (2026-07-19). Fixes a live incident: an agent repeatedly consumed
+user chat messages then ended the turn with an `<internal>`-only result
+("nothing further to send"), so the user got silence — happened 4× in one
+evening on `slack_book-recs`, each needing a manual `on_wake` nudge. The
+existing wrapping-nudge misses this because `stripInternalTags` leaves an empty
+scratchpad (`hasUnwrapped` is false).
+
+The patch adds a `batchHasUserChat()` helper (true when a batch has a `chat`/
+`chat-sdk` message whose id is not `restart-*`) and threads a `pendingUserReply`
+flag through `processQuery`: once a user-chat message enters the turn, the turn
+owes a sent `<message>` block. On an `<internal>`-only / zero-sent result it
+fires one corrective `<system>` re-prompt (`replyNudged`); a second silent
+refusal logs `ERROR`. The exchange-complete `status` is marked `undelivered`
+while a reply is still owed, and `archivePrompts` is kept queued across the
+nudge so the retry archives against the user prompt, not the nudge text.
+
+**Re-evaluate on upgrade — do NOT apply as a diff.** The poll-loop file has ~9
+upstream commits since our base; `processQuery`'s signature, the exchange-hook
+result handling, and the wrapping-nudge block have all likely moved. This patch
+must be **re-implemented** against the new structure. Before doing so, check
+whether upstream already guarantees a user-facing reply on chat turns (grep the
+new poll-loop for reply/nudge/undelivered semantics) — if so, drop this patch.
+Distinct from upstream's **one-door task delivery** (that governs *task/
+scheduled* sessions requiring an explicit `to`; this governs *interactive*
+chat turns owing any reply). Not superseded by it.
+
+## 8. Misc
 
 - `.gitignore` — fork additions: `_bmad/`, `.claude/skills/bmad-*/` (BMAD tooling
   is local-only, intentionally untracked).
