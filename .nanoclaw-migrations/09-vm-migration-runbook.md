@@ -21,8 +21,12 @@ Sources: grep of all agent specs/scripts + live `docker ps` on aliera.
 | game-gecko | — | external BGA API only, no local backend | — | repo/venv/crons move to VM 206 (mounts must be host-local) |
 | hash-monkey | — | external Weedmaps API only | — | no change |
 
-**ufw scoping on 205:** 6333 + 8001 from 192.168.1.206 (+ aliera .110 during
-soak). **ufw on aliera:** 11434 from .205 (RSSBrew/qwen) + .206 (agent embeds).
+**ufw scoping on 205:** 6333 + 8001 from 192.168.1.206 (+ aliera .110,
+soak-scoped — removed at step 9). **ufw on aliera:** add 11434 from .205
+(RSSBrew/qwen) + .206 (agent embeds) — verified 2026-08-23: today's rules
+admit ONLY docker-bridge ranges (172.17/172.19), so LAN callers are blocked
+until this lands. **Must be in place before step 4's verification** or
+ai-news fails with a confusing qwen timeout.
 
 ## App-side work items (nanoclaw session)
 
@@ -58,12 +62,17 @@ every new piece. End state 42G/46G — hard stop for new proxmox1 tenants.
 
 ## Sequencing
 
-1. Fresh complete backup (gate) → 2. 205 RAM bump window → 3. Backends up on
-205 + data migrated → 4. **Re-point aliera's nanoclaw to 205 backends and
-verify agents green** (validates backends before the VM move risks anything)
-→ 5. VM 206 provisioned → 6. App install/restore on 206 (aliera service
-STOPPED first) → 7. Acceptance → 8. 1-week soak (aliera services stopped, not
-removed) → 9. Decommission + catalog/docs final pass.
+1. Fresh complete backup (gate) → 2. **GPU driver fix + aliera reboot** (early
+on purpose: qwen-over-LAN gets tested in its final form, and the reboot
+happens while everything still runs on aliera where restart is routine) →
+3. 205 RAM bump window; backends up on 205 + data migrated; **aliera ufw
+opens 11434 to .205/.206** (blocker for the next step — see inventory note) →
+4. **Re-point aliera's nanoclaw to 205 backends and verify agents green**
+(validates backends before the VM move risks anything) → 5. VM 206
+provisioned → 6. App install/restore on 206 (aliera service STOPPED first) →
+7. Acceptance → 8. 1-week soak (aliera services stopped, not removed) →
+9. Decommission + catalog/docs final pass (incl. removing the soak-scoped
+.110 allowances on 205).
 
 Step 4 is deliberate: it splits "backends moved" from "nanoclaw moved" so a
 regression is attributable to one change, and rollback at any point before 6
@@ -90,7 +99,7 @@ specs back. aliera keeps everything stopped-not-removed for the soak week.
 
 ## Open items riding along
 
-- GTX 1060 driver fix + aliera reboot (before cutover, so qwen has its GPU
-  when 205 starts calling over LAN).
 - clidash: reinstall on 206 (its config points at local `bin/ncl`).
 - `hb-nanoclaw-staging` grace stays 2h; no change needed.
+
+(GTX 1060 driver fix was promoted from here into sequencing step 2.)
