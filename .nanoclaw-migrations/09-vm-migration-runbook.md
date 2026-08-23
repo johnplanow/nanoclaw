@@ -54,9 +54,18 @@ ai-news fails with a confusing qwen timeout.
 ## Estate-side work items (ansible session) — summary, details in their doc
 
 205 RAM 4G→6G (+reboot, Kuma maintenance window) · `containers_backends`
-Quadlet role (pinned, rootless, `backends` network, ufw-scoped) · backend data
-migration (stop → rsync: Qdrant ~5.1G, RSSBrew DB, redis RDB) · VM 206 via
-`deploy_app.yml` (Debian 13, docker+node22) · backup re-point (app_vars
+Quadlet role (images pinned by digest to what aliera runs, rootless,
+`backends` network, ufw-scoped — consumers: .206, .110 soak-scoped, **and
+o11y .202 for the Kuma port monitors**) · backend data migration (stop →
+rsync: Qdrant ~5.1G volume + RSSBrew `/app/data` only — **redis is ephemeral**
+(`--save "" --appendonly no`), nothing to migrate) · **RSSBrew is a local
+patched build**, rebuilt on 205 from news-agg ref `a8ee399`
+(`containers_backends_newsagg_ref`); base image must ALSO be digest-pinned:
+`yinanc/rssbrew@sha256:9aef2bf2e3576482b44b515fccd8322ba0a1702b37ff671737dbeb69cc17f618`
+(the Dockerfile's bare `FROM yinanc/rssbrew` would pull today's `latest`,
+which may not be the 2025-09-02 layer aliera runs; the patch asserts loudly
+on divergence, but digest-pin avoids discovering that mid-migration) · VM 206
+via `deploy_app.yml` (Debian 13, docker+node22) · backup re-point (app_vars
 target_host → 206; staging path + heartbeats unchanged) · catalog/Kuma for
 every new piece. End state 42G/46G — hard stop for new proxmox1 tenants.
 
