@@ -174,3 +174,14 @@ chat turns owing any reply). Not superseded by it.
 - **Package manager:** pnpm (corepack), Node ≥ 20; container agent-runner is Bun.
 - **Updates:** `/update-nanoclaw` for normal same-line updates; the intent-based
   `/migrate-nanoclaw` + `.nanoclaw-migrations/` guide for the next major.
+
+## 9. Task delivery: origin-thread inheritance + legacy-task visibility (2026-08-24)
+
+Two fork blocks fixing v2.2.0 `ncl tasks` regressions (marked `// Fork:`):
+- `src/delivery.ts` (`deliverMessage`): a task-session send to a channel
+  destination with no explicit thread inherits the origin session's thread
+  (task row `originSessionId` → session → thread_id), same messaging group
+  only. Restores thread-scoped watcher delivery (game-gecko turn advice).
+- `src/cli/resources/tasks.ts` (`selectedSessions`): group-scoped task
+  verbs also scan the group's active chat sessions so legacy session-bound
+  tasks stay visible to agents. **Conflict hotspots** — both upstream core.
