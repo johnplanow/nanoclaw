@@ -7,6 +7,7 @@ import { resolveGroupTimezone } from '../../container-config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   findTaskSessions,
+  getSessionsByAgentGroup,
   getActiveSessions,
   getSession,
   isTaskThread,
@@ -94,8 +95,18 @@ function selectedSessions(args: Record<string, unknown>, ctx: CallerContext): Sc
 
   const group = groupArg(args, ctx);
   if (group) {
-    // One session per live task series — the loops below already fan out across them.
-    return findTaskSessions(group).map((s) => ({ id: s.id, agent_group_id: s.agent_group_id }));
+    // One session per live task series — the loops below already fan out across
+    // them. Fork: ALSO include the group's other active sessions, because
+    // legacy (pre-ncl-tasks) tasks live inside the chat session that created
+    // them — task-sessions-only scope made a still-firing legacy watcher
+    // invisible to the agent's own `tasks list` (it kept polling a day past
+    // game end before being found host-side). Dedup by session id.
+    const byId = new Map<string, ScopedSession>();
+    for (const s of findTaskSessions(group)) byId.set(s.id, { id: s.id, agent_group_id: s.agent_group_id });
+    for (const s of getSessionsByAgentGroup(group)) {
+      if (s.status === 'active' && !byId.has(s.id)) byId.set(s.id, { id: s.id, agent_group_id: s.agent_group_id });
+    }
+    return [...byId.values()];
   }
 
   if (ctx.caller === 'agent') return [];

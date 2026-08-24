@@ -13,6 +13,7 @@ import {
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
+  getSession,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
 } from './db/sessions.js';
@@ -349,6 +350,33 @@ async function deliverMessage(
       }
     }
     deliverInstance = mg.instance;
+
+    // Fork: task-session sends inherit the origin thread. Since the ncl-tasks
+    // migration, tasks run in a dedicated system session with no thread
+    // binding, so a send to a channel destination lands top-level — but the
+    // creating session (origin_session_id on the task row) is often a real
+    // Slack thread (e.g. game-gecko's per-game turn-watchers, whose advice
+    // belongs in the game's thread). When a task-session message has no
+    // explicit thread and the origin session is a thread-bound session on the
+    // SAME messaging group, deliver into the origin's thread. Explicit
+    // thread_id from the agent always wins; cross-channel sends are never
+    // re-threaded; a closed/missing origin falls through to top-level.
+    if (!msg.thread_id && session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
+      const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+      try {
+        const taskRow = inDb
+          .prepare("SELECT content FROM messages_in WHERE kind = 'task' AND series_id = ? ORDER BY seq DESC LIMIT 1")
+          .get(series) as { content: string } | undefined;
+        const originId = taskRow ? (JSON.parse(taskRow.content).originSessionId as string | null) : null;
+        const origin = originId ? getSession(originId) : undefined;
+        if (origin && origin.messaging_group_id === mg.id && origin.thread_id && !isTaskThread(origin.thread_id)) {
+          msg.thread_id = origin.thread_id;
+          log.info('Task send inherited origin thread', { id: msg.id, series, threadId: origin.thread_id });
+        }
+      } catch (err) {
+        log.warn('Origin-thread lookup failed — delivering top-level', { id: msg.id, series, err });
+      }
+    }
   }
 
   // Track pending questions for ask_user_question flow.
