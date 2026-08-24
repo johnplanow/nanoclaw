@@ -559,8 +559,8 @@ async function buildContainerArgs(
   // host.docker.internal is remapped to the gateway itself, so NO_PROXY is
   // moot AND host-local backends become unreachable. Keep lockdown off for
   // this install (see egress-lockdown.ts, ensureEgressNetwork above).
-  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1');
-  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1');
+  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1,192.168.1.205,192.168.1.110');
+  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1,192.168.1.205,192.168.1.110');
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
