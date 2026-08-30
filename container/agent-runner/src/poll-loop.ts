@@ -587,7 +587,7 @@ export async function processQuery(
                 `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
                   `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
                   `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
+                  `Re-send the FULL response content inside the block — the user saw NOTHING of your last output, so never refer to it (no "above", no "as I said"); include everything again.</system>`,
               );
             } else if (needsReplyNudge) {
               replyNudged = true;
@@ -599,7 +599,7 @@ export async function processQuery(
                 `<system>This turn processed user message(s) but nothing was sent to the user. ` +
                   `An <internal> note is not a reply, and narrating a response without a block does not send it. ` +
                   `Every user message requires a user-facing response — even a one-line acknowledgment of what you did. ` +
-                  `Send it NOW inside <message to="name">...</message>. Your destinations: ${names}.</system>`,
+                  `Send it NOW inside <message to="name">...</message> with the FULL content — the user saw NOTHING unsent, so never reference it (no "above"). Your destinations: ${names}.</system>`,
               );
             } else if (pendingUserReply && sent === 0 && !routing.taskRun) {
               log(`ERROR: reply enforcement failed — user message(s) remain unanswered after nudge`);
