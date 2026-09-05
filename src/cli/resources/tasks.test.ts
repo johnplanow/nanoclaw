@@ -503,6 +503,131 @@ describe('tasks CLI resource', () => {
       if (!resp.ok) expect(resp.error.message).toMatch(/--id is required/);
     });
   });
+
+  // Fork: --in-origin-session / --session run a task INSIDE a chat session.
+  describe('tasks inside a chat session (--in-origin-session)', () => {
+    it('agent --in-origin-session writes the task into the caller chat session and it stays listable', async () => {
+      const resp = await dispatch(
+        {
+          id: 'ios-1',
+          command: 'tasks-create',
+          args: {
+            name: 'watch-1',
+            prompt: 'advise the turn',
+            recurrence: '*/15 5-23 * * *',
+            script: 'echo {\"wakeAgent\":false}',
+            in_origin_session: true,
+          },
+        },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(resp.ok).toBe(true);
+      if (!resp.ok) return;
+      const created = resp.data as { series_id: string; session_id: string; origin_session_id: string };
+      expect(created.session_id).toBe('chat-1');
+      expect(created.origin_session_id).toBe('chat-1');
+
+      const chatDb = new Database(inboundDbPath('ag-1', 'chat-1'), { readonly: true });
+      const row = chatDb.prepare("SELECT series_id, status FROM messages_in WHERE kind = 'task'").get() as {
+        series_id: string;
+        status: string;
+      };
+      chatDb.close();
+      expect(row).toEqual({ series_id: created.series_id, status: 'pending' });
+      // No per-series system session was created for it.
+      expect(getSessionsByAgentGroup('ag-1').some((s) => s.thread_id === taskThreadId(created.series_id))).toBe(false);
+
+      const list = await dispatch({ id: 'ios-2', command: 'tasks-list', args: {} }, agentCtx('ag-1', 'chat-1'));
+      expect(list.ok).toBe(true);
+      if (!list.ok) return;
+      const rows = list.data as Array<{ series_id: string; session_id: string }>;
+      expect(rows.find((r) => r.series_id === created.series_id)?.session_id).toBe('chat-1');
+    });
+
+    it('host --session targets an existing chat session; task sessions and foreign sessions are rejected', async () => {
+      const ok = await dispatch(
+        {
+          id: 'ios-3',
+          command: 'tasks-create',
+          args: { group: 'ag-1', session: 'chat-1', prompt: 'x', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'host' },
+      );
+      expect(ok.ok).toBe(true);
+      if (ok.ok) expect((ok.data as { session_id: string }).session_id).toBe('chat-1');
+
+      // A per-series system session is not a valid target.
+      const sys = await dispatch(
+        { id: 'ios-4', command: 'tasks-create', args: { prompt: 'y', process_after: '2999-01-01T00:00:00Z' } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(sys.ok).toBe(true);
+      if (!sys.ok) return;
+      const sysId = (sys.data as { session_id: string }).session_id;
+      const bad = await dispatch(
+        {
+          id: 'ios-5',
+          command: 'tasks-create',
+          args: { group: 'ag-1', session: sysId, prompt: 'z', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'host' },
+      );
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) expect(bad.error.message).toMatch(/task system session/);
+
+      // Another group's session is invisible to the host as a target for this group.
+      const foreign = await dispatch(
+        {
+          id: 'ios-6',
+          command: 'tasks-create',
+          args: { group: 'ag-1', session: 'chat-2', prompt: 'z', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'host' },
+      );
+      expect(foreign.ok).toBe(false);
+      if (!foreign.ok) expect(foreign.error.message).toMatch(/session not found/);
+
+      // An agent may not point --session at a session other than its own.
+      const agentOther = await dispatch(
+        {
+          id: 'ios-7',
+          command: 'tasks-create',
+          args: { session: 'chat-2', prompt: 'z', process_after: '2999-01-01T00:00:00Z' },
+        },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(agentOther.ok).toBe(false);
+      if (!agentOther.ok) expect(agentOther.error.message).toMatch(/own session/);
+    });
+
+    it('append-log derives the series from the task row the chat session is processing', async () => {
+      const created = await dispatch(
+        {
+          id: 'ios-8',
+          command: 'tasks-create',
+          args: { name: 'watch-2', prompt: 'x', process_after: '2999-01-01T00:00:00Z', in_origin_session: true },
+        },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id } = created.data as { series_id: string };
+
+      // Simulate the fire: the host marks the claimed row processing.
+      const chatDb = new Database(inboundDbPath('ag-1', 'chat-1'));
+      chatDb.prepare("UPDATE messages_in SET status = 'processing' WHERE id = ?").run(series_id);
+      chatDb.close();
+
+      const resp = await dispatch(
+        { id: 'ios-9', command: 'tasks-append-log', args: { msg: 'advised r12' } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(resp.ok).toBe(true);
+      if (!resp.ok) return;
+      expect((resp.data as { series: string }).series).toBe(series_id);
+      expect(fs.readFileSync(`${TEST_DIR}/groups/ag-1/tasks/${series_id}.md`, 'utf8')).toContain('advised r12');
+    });
+  });
 });
 
 describe('formatTasksTable', () => {

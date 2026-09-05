@@ -39,6 +39,30 @@ ncl tasks create \
 `--process-after` accepts an ISO 8601 timestamp or a local time interpreted in
 the installation timezone.
 
+## Run a task inside the chat session that created it
+
+By default a task runs in an isolated system session: its wakes know nothing
+about any conversation, and a conversation knows nothing about its wakes. For
+a per-thread watcher that is the wrong shape — the human's messages and the
+watcher's fires are one story. Pass `--in-origin-session` (from inside an
+agent container) or `--session <chat_session_id>` (from the host) to store the
+task row in that chat session instead:
+
+```bash
+ncl tasks create --name "watch-<TABLE>" --in-origin-session \
+  --recurrence "*/15 5-23 * * *" \
+  --script "bash /workspace/extra/game-gecko/scripts/turn_poll.sh <TABLE>" \
+  --prompt "Wake for table <TABLE> ..."
+```
+
+Every fire then wakes that conversation's session — same transcript, same
+compaction history, same memory of what was said — and `send_message` resolves
+the thread from that session's own inbound messages. Recurrence, script gates,
+`tasks list/run/cancel/get`, and the run log all work unchanged; the run log's
+series is derived from the task row the session is processing. Agents can
+only target their own session; the host can name any active chat session of
+the group. Task system sessions are not valid targets.
+
 ## Delivery and run logs
 
 A scheduled task has no chat attached to it. If its result should reach a

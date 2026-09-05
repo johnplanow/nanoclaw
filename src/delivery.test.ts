@@ -35,7 +35,7 @@ import {
   createMessagingGroupAgent,
 } from './db/index.js';
 import { getDeliveredIds } from './db/session-db.js';
-import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
+import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb, inboundDbPath } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 
@@ -406,5 +406,43 @@ describe('deliverSessionMessages — task_log rows (one-door task delivery)', ()
     // Marked delivered — the row is not retried.
     const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
     expect(delivered.has('log-1')).toBe(true);
+  });
+
+  // Fork: a task running INSIDE a chat session (--in-origin-session) logs to
+  // the series of the task row that session most recently fired.
+  it("appends to the fired task's series log when the session is a chat session", async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const inDb = new Database(inboundDbPath('ag-1', session.id));
+    inDb
+      .prepare(
+        `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, content, series_id)
+         VALUES ('watch-9', 2, datetime('now'), 'processing', 1, datetime('now'), NULL, 'task', ?, 'watch-9')`,
+      )
+      .run(JSON.stringify({ prompt: 'advise', script: null, originSessionId: session.id }));
+    inDb.close();
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES ('log-2', datetime('now'), 'task_log', ?)`,
+    ).run(JSON.stringify({ text: 'advised r12; journal updated' }));
+    db.close();
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_c, _p, _t, _k, content) {
+        calls.push(content);
+        return 'pm';
+      },
+    });
+    await deliverSessionMessages(session);
+
+    expect(calls).toHaveLength(0);
+    const logFile = `${TEST_DIR}/groups/test-agent/tasks/watch-9.md`;
+    expect(fs.existsSync(logFile)).toBe(true);
+    expect(fs.readFileSync(logFile, 'utf8')).toContain('advised r12; journal updated');
+    expect(getDeliveredIds(openInboundDb('ag-1', session.id)).has('log-2')).toBe(true);
   });
 });

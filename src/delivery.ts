@@ -275,15 +275,33 @@ async function deliverMessage(
   // the only delivery path from a task session). Append to the series log,
   // never deliver. The caller marks it delivered so it isn't retried.
   if (msg.kind === 'task_log') {
+    let series: string | undefined;
     if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
-      const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+      series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+    } else {
+      // Fork: a task running inside a chat session (--in-origin-session) —
+      // the series is the task row this session most recently fired.
+      try {
+        const row = inDb
+          .prepare(
+            `SELECT id, series_id FROM messages_in
+              WHERE kind = 'task' AND status IN ('processing', 'completed', 'failed')
+              ORDER BY seq DESC LIMIT 1`,
+          )
+          .get() as { id: string; series_id: string | null } | undefined;
+        series = row ? (row.series_id ?? row.id) : undefined;
+      } catch (err) {
+        log.warn('task_log series lookup failed', { id: msg.id, sessionId: session.id, err });
+      }
+    }
+    if (series) {
       try {
         appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
       }
     } else {
-      log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
+      log.warn('task_log row with no fired task in session — ignoring', { id: msg.id, sessionId: session.id });
     }
     return;
   }

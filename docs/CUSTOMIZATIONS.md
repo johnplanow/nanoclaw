@@ -185,3 +185,27 @@ Two fork blocks fixing v2.2.0 `ncl tasks` regressions (marked `// Fork:`):
 - `src/cli/resources/tasks.ts` (`selectedSessions`): group-scoped task
   verbs also scan the group's active chat sessions so legacy session-bound
   tasks stay visible to agents. **Conflict hotspots** — both upstream core.
+
+## 10. Tasks may run inside their origin chat session (2026-09-05)
+
+Fork blocks (marked `// Fork:`) re-exposing the pre-`ncl tasks` shape — a
+task row living in the chat session that created it — as an opt-in:
+- `src/modules/scheduling/create.ts` (`createScheduledTask`): `sessionId`
+  option → `resolveHostSession` (must be active, same group, not a
+  `system:tasks:*` session) instead of `resolveTaskSession`.
+- `src/cli/resources/tasks.ts`: `tasks create --in-origin-session` (agent →
+  own session) / `--session <id>` (host); `append-log` derives the series
+  from the task row the chat session is processing (`firedSeriesInSession`).
+- `src/delivery.ts`: `task_log` rows from a chat session append to that
+  fired row's series log instead of being ignored.
+- Docs: `docs/scheduled-tasks.md` "Run a task inside the chat session".
+
+Why: game-gecko's per-game BGA turn-watchers fired in an isolated task
+session while the human talked to the thread session — two contexts advising
+one game, and on 2026-09-02 they contradicted each other within 80 minutes
+(game-gecko repo, `docs/obsession-structural-review-2026-09-03.md` §3.6).
+With the watcher inside the thread's session there is one transcript per
+game. §9's origin-thread delivery inheritance stays for legacy/isolated
+tasks. **Conflict hotspots**: same two upstream files as §9 plus
+`create.ts`; tests in `tasks.test.ts` ("tasks inside a chat session") and
+`delivery.test.ts` cover the fork.

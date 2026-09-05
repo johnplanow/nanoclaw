@@ -118,6 +118,25 @@ function withInbound<T>(session: ScopedSession, fn: (db: Database.Database) => T
   return withInboundDb(session.agent_group_id, session.id, fn);
 }
 
+/**
+ * Fork: series of the task row most recently fired in a CHAT session (a task
+ * scheduled with --in-origin-session). A chat session processes one batch at
+ * a time, so the newest non-live task row is the one whose run is producing
+ * the log line / append-log call.
+ */
+export function firedSeriesInSession(session: ScopedSession): string | undefined {
+  return withInbound(session, (db) => {
+    const row = db
+      .prepare(
+        `SELECT id, series_id FROM messages_in
+          WHERE kind = 'task' AND status IN ('processing', 'completed', 'failed')
+          ORDER BY seq DESC LIMIT 1`,
+      )
+      .get() as { id: string; series_id: string | null } | undefined;
+    return row ? (row.series_id ?? row.id) : undefined;
+  });
+}
+
 function toOutput(session: ScopedSession, row: TaskRow) {
   const content = parseTaskContent(row.content);
   return {
@@ -185,8 +204,24 @@ function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
     timezone: resolveGroupTimezone(group),
   });
+  // Fork: --in-origin-session (agent) / --session (host) run the task INSIDE
+  // an existing chat session instead of a per-series system session. See
+  // createScheduledTask. Agents may only target their own session.
+  let sessionId: string | null = null;
+  const explicit = str(args.session);
+  if (bool(args.in_origin_session)) {
+    if (ctx.caller !== 'agent')
+      throw new Error('--in-origin-session needs an agent caller; from the host pass --session <chat_session_id>');
+    sessionId = ctx.sessionId;
+  } else if (explicit) {
+    if (ctx.caller === 'agent' && explicit !== ctx.sessionId) {
+      throw new Error('agents can only schedule into their own session — use --in-origin-session');
+    }
+    sessionId = explicit;
+  }
   const { session, row } = createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
+    sessionId,
   });
   return toOutput(session, row);
 }
@@ -212,6 +247,11 @@ function appendTaskLog(
     if (sess && sess.thread_id && isTaskThread(sess.thread_id)) {
       series = sess.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
       group ??= sess.agent_group_id;
+    } else if (sess) {
+      // Fork: a task running inside a chat session (--in-origin-session) —
+      // the series is the task row this container is processing right now.
+      series = firedSeriesInSession({ id: sess.id, agent_group_id: sess.agent_group_id });
+      if (series) group ??= sess.agent_group_id;
     }
   }
   if (!series) throw new Error('--id is required (no task session to derive it from)');
@@ -499,6 +539,10 @@ registerResource({
         `carries a --script gate (the script decides whether each fire needs you — a gated fire that\n` +
         `finds nothing costs zero tokens) or you pass --dangerously-override-recurrence-limit after\n` +
         `the user explicitly confirmed they want an ungated frequent task.\n\n` +
+        `Session choice: by default a task runs in its own isolated system session and must pick a delivery\n` +
+        `destination explicitly. Pass --in-origin-session to run it INSIDE the chat session you are in: every\n` +
+        `fire then wakes THIS conversation (same transcript, same memory of what the human said), which is what a\n` +
+        `per-thread watcher wants. Delivery still goes through send_message; the thread resolves from this session.\n\n` +
         `Failure backoff: a script that ERRORS repeatedly backs the series off (2,4,8,…60 min between fires; each errored fire counts as a failed run); after 8 consecutive failures the series is auto-paused with a note in its run log — fix the script, then \`ncl tasks resume <id>\`. A deliberate wakeAgent=false is a normal run and never backs off. \`ncl tasks get <id>\` shows failed_runs and the run log.`,
       args: [
         {
@@ -533,6 +577,18 @@ registerResource({
           name: 'group',
           type: 'string',
           description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
+        },
+        {
+          name: 'in_origin_session',
+          type: 'boolean',
+          description:
+            "Run the task INSIDE this chat session (the one creating it) instead of an isolated task session, so its wakes share this conversation's context and history. For per-thread watchers whose fires must know what the human said here. Agent callers only.",
+        },
+        {
+          name: 'session',
+          type: 'string',
+          description:
+            'Host callers: run the task inside this existing chat session id (same effect as --in-origin-session).',
         },
       ],
       examples: [
