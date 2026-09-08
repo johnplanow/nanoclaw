@@ -112,3 +112,32 @@ specs back. aliera keeps everything stopped-not-removed for the soak week.
 - `hb-nanoclaw-staging` grace stays 2h; no change needed.
 
 (GTX 1060 driver fix was promoted from here into sequencing step 2.)
+
+## Step 6 execution log (2026-09-07 22:14–22:40 MDT)
+
+Pre-cutover gaps found on 206 and fixed: `sops` binary + backup PGP pubkey
+missing; `cron` package not installed; system tz was `Etc/UTC` (nanoclaw takes
+the install tz from the system — set to `America/Denver`); Playwright chromium
+not installed; repo 3 commits behind; clidash unit absent. Base + per-group
+images rebuilt on 206 (Fable 5.1 CLI pins).
+
+Cutover: aliera `nanoclaw` + `clidash` disabled+stopped 22:31, agent
+containers killed, nanoclaw/game-gecko crons commented out (`#SOAK-2026-09-07`),
+final staging snapshot (199 DBs) rsynced to 206 (`data/`, `groups/` minus
+`.git`, `game-gecko/.bga`, staging dir). Fixups + crontab applied; 206
+service enabled 22:32; Slack Socket Mode connected first try.
+
+Two post-start defects, both fixed:
+- `scripts/backup-snapshot.ts` hardcoded `/home/jplanow` → EACCES on 206.
+  Fixed (fork 49fe2930, 4a5fcb74: `$HOME` + real hostname in MANIFEST).
+- **OneCLI vault: every agent got `401 No credentials configured`.** The
+  gateway on 206 had generated its own `/app/data/secret-encryption-key`
+  (app-data volume) on 08-24 first boot, so aliera's restored `secrets` rows
+  failed to decrypt ("skipping secret: decryption failed"). Fix: stream
+  aliera's key into 206's `onecli_app-data` volume (old key kept as
+  `secret-encryption-key.206-generated-20260824`), `docker compose restart
+  onecli`. **A pg_dump restore is NOT a complete vault restore — the key file
+  in the app-data volume must travel with it.** Added to the secrets-restore
+  recipe.
+- Dead-man ping from 206 timed out: Kuma on o11y gates 3001 via a
+  DOCKER-USER allow-list; ansible session added .206 (add4301).

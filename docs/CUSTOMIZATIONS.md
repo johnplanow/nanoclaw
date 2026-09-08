@@ -209,3 +209,17 @@ game. §9's origin-thread delivery inheritance stays for legacy/isolated
 tasks. **Conflict hotspots**: same two upstream files as §9 plus
 `create.ts`; tests in `tasks.test.ts` ("tasks inside a chat session") and
 `delivery.test.ts` cover the fork.
+
+## 11. Host moved aliera → VM 206 (nanoclaw-vm), 2026-09-07
+
+Phase 2 step 6 executed; runbook + execution log in
+`.nanoclaw-migrations/09-vm-migration-runbook.md`. aliera keeps a stopped,
+disabled copy for the 1-week soak (step 8); step 9 removes it.
+
+**OneCLI vault restore gotcha (bit us at cutover):** `onecli-vault.sql` alone
+is not a restorable vault. The gateway encrypts secret values with a key at
+`/app/data/secret-encryption-key` inside the `onecli_app-data` docker volume;
+a fresh gateway generates its own on first boot and then every restored secret
+fails to decrypt ("skipping secret: decryption failed" → agents get
+`401 No credentials configured`). Restore = pg_dump **and** that key file
+(same volume also holds the MITM CA at `gateway/ca.{key,pem}`).
