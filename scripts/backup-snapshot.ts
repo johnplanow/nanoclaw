@@ -75,6 +75,21 @@ async function main(): Promise<void> {
     }
   }
 
+  // Per-agent-group Claude state (`.claude-shared`, mounted at
+  // /home/node/.claude): SDK conversation transcripts + session-env. Without
+  // it every existing session fails to resume with "No conversation found" —
+  // learned at the 2026-09-07 VM 206 cutover, where it was missing from the
+  // restore and broke the daily brief + turn-watchers.
+  if (fs.existsSync(sessionsRoot)) {
+    for (const ag of fs.readdirSync(sessionsRoot)) {
+      const src = path.join(sessionsRoot, ag, '.claude-shared');
+      if (!fs.existsSync(src) || !fs.statSync(src).isDirectory()) continue;
+      const dst = path.join(TMP, 'data', 'v2-sessions', ag, '.claude-shared');
+      fs.mkdirSync(dst, { recursive: true });
+      execFileSync('rsync', ['-a', '--delete', `${src}/`, `${dst}/`]);
+    }
+  }
+
   // Small state files.
   for (const f of ['upgrade-state.json', 'circuit-breaker.json']) {
     const src = path.join(PROJECT_ROOT, 'data', f);
