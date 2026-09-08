@@ -154,3 +154,17 @@ all eight dirs from aliera (~56 MB, `--update`), added them to
 `scripts/backup-snapshot.ts` (1e106a88), re-fired the brief with
 `ncl tasks run`. Secondary defect to fix later: on that resume error the
 container hung until the 30-min heartbeat ceiling instead of exiting.
+
+### Day-1 defects, continued (2026-09-08 08:00–08:35)
+
+- `~/game-gecko` on 206 was the 08-24 prep copy, 10 commits behind (no Lost
+  Fleet fetch support → Gaia watcher never saw `Active: jplanow`). The
+  cutover rsync covered only `.bga/`; the repo itself was never re-synced.
+  Fixed by direct push from aliera + hand-merge of the journal the 206 agent
+  had already written. 206 got its own read-write deploy key for game-gecko.
+- `~/game-gecko/.env` (BGA creds) on 206 was a stale 07-02 copy → 06:00
+  login cron hit "Wrong password 1/3". Copied current file; login verified.
+- Watcher `.advised` flag was consumed by the failed 07:00 run (see
+  `.claude-shared` defect above) → cleared by hand and re-fired.
+**Lesson for any future host move: re-sync EVERY working tree the agents
+mount (repo + dotfiles the allowlist hides), not just runtime state dirs.**
