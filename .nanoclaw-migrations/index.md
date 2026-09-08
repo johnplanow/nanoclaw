@@ -14,6 +14,8 @@ Upstream: aecad864e6371cb2a77ceaff8a38f9c4a8b71774 (upstream/main, v2.1.24)
 > **v2.1.24 → v2.2.0 UPGRADE COMPLETED (2026-08-16)** via intent-based re-apply.
 > Fork now at `2e91be09` on upstream v2.2.0 (`cde0e39`). Ordered checklist +
 > breaking-change matrix + cutover record: [08-v2.2-upgrade.md](08-v2.2-upgrade.md).
+> **v2.2.0 → v2.3.0 (2026-09-08):** [10-v2.3-upgrade.md](10-v2.3-upgrade.md). Host move
+> aliera → VM 206 (2026-09-07): [09-vm-migration-runbook.md](09-vm-migration-runbook.md).
 
 Tier 3 migration. Sections live in this directory:
 
