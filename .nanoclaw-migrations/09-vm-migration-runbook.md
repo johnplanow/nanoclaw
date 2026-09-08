@@ -1,6 +1,6 @@
 # Phase 2 — NanoClaw constellation migration to proxmox1 (MERGED RUNBOOK)
 
-**Status: DRAFT for John's review. Nothing executes until approved.**
+**Status: STEP 6 EXECUTED 2026-09-07; soak (step 8) running, step 9 due ~2026-09-14.**
 Estate half: `ansible-playbooks/docs/nanoclaw-migration-plan.md` (e03e5bb).
 App half + merge: this doc. Architecture approved 2026-08-23: backends →
 containers VM 205 (Quadlets); nanoclaw → new VM 206 (4G/2vCPU,
@@ -89,15 +89,15 @@ is just re-pointing URLs.
 
 ## Acceptance checklist (step 7)
 
-- [ ] Each agent answers in its Slack channel (movie-recs → Qdrant+Ollama;
+- [x] (2026-09-07 22:38) Each agent answers in its Slack channel (movie-recs → Qdrant+Ollama;
       ai-news → RSSBrew; game-gecko → BGA fetch; hash-monkey → Weedmaps)
-- [ ] 👀 indicator + reply delivery work
-- [ ] Daily brief fires next 05:45 with feed-health footer clean
-- [ ] Turn-watcher fires on schedule from 206
-- [ ] `ncl` works on 206; clidash re-pointed or reinstalled
-- [ ] Backup chain green from 206 (staging heartbeat + 03:15 ship + tarball
+- [x] (2026-09-07 22:38) 👀 indicator + reply delivery work
+- [ ] (pending 2026-09-08 05:45) Daily brief fires next 05:45 with feed-health footer clean
+- [x] (2026-09-07 22:45, runs 193/191) Turn-watcher fires on schedule from 206
+- [x] (2026-09-07) `ncl` works on 206; clidash reinstalled (unit + config)
+- [x] (2026-09-07 22:44 live ship nanoclaw_20260907_224403.tar.gz, both dead-men) Backup chain green from 206 (staging heartbeat + 03:15 ship + tarball
       with secrets)
-- [ ] OneCLI credentialed call succeeds from an agent (gateway bind correct)
+- [x] (2026-09-07 22:38, after the vault-key fix) OneCLI credentialed call succeeds from an agent (gateway bind correct)
 
 ## Rollback
 
