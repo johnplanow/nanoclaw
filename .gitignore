@@ -51,3 +51,8 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+
+# Fork: BMAD tooling is local-only, intentionally untracked
+_bmad/
+.claude/skills/bmad-*/
+tools/clidash/clidash.config.json

@@ -7,6 +7,7 @@ import {
   deleteSession,
   findTaskSessions,
   getActiveSessions,
+  getSessionsByAgentGroup,
   getSession,
   isTaskThread,
   taskThreadId,
@@ -91,11 +92,20 @@ async function selectedSessions(
 
   const group = groupArg(args, ctx);
   if (group) {
-    // One session per live task series — the loops below already fan out across them.
-    return (await findTaskSessions(group, includeClosed)).map((s) => ({
-      id: s.id,
-      agent_group_id: s.agent_group_id,
-    }));
+    // One session per live task series — the loops below already fan out across
+    // them. Fork (docs/CUSTOMIZATIONS.md §9): ALSO include the group's other
+    // active sessions, because legacy (pre-ncl-tasks) and --in-origin-session
+    // tasks live inside the chat session that created them — task-sessions-only
+    // scope made a still-firing watcher invisible to the agent's own
+    // `tasks list`. Dedup by session id.
+    const byId = new Map<string, ScopedSession>();
+    for (const s of await findTaskSessions(group, includeClosed)) {
+      byId.set(s.id, { id: s.id, agent_group_id: s.agent_group_id });
+    }
+    for (const s of await getSessionsByAgentGroup(group)) {
+      if (s.status === 'active' && !byId.has(s.id)) byId.set(s.id, { id: s.id, agent_group_id: s.agent_group_id });
+    }
+    return [...byId.values()];
   }
 
   if (ctx.caller === 'agent') return [];
@@ -104,6 +114,14 @@ async function selectedSessions(
 
 function withInbound<T>(session: ScopedSession, fn: (mailbox: InboundMailbox) => T): Promise<T | undefined> {
   return withExistingMailboxSession(session.agent_group_id, session.id, fn);
+}
+
+/**
+ * Fork (§10): series of the task row most recently fired in a CHAT session (a
+ * task scheduled with --in-origin-session). See InboundMailbox.latestFiredTaskSeries.
+ */
+export async function firedSeriesInSession(session: ScopedSession): Promise<string | undefined> {
+  return withInbound(session, (mailbox) => mailbox.latestFiredTaskSeries());
 }
 
 function toOutput(session: ScopedSession, row: TaskRow) {
@@ -154,8 +172,24 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
     timezone: await resolveGroupTimezone(group),
   });
+  // Fork (§10): --in-origin-session (agent) / --session (host) run the task
+  // INSIDE an existing chat session instead of a per-series system session.
+  // See createScheduledTask. Agents may only target their own session.
+  let sessionId: string | null = null;
+  const explicit = str(args.session);
+  if (bool(args.in_origin_session)) {
+    if (ctx.caller !== 'agent')
+      throw new Error('--in-origin-session needs an agent caller; from the host pass --session <chat_session_id>');
+    sessionId = ctx.sessionId;
+  } else if (explicit) {
+    if (ctx.caller === 'agent' && explicit !== ctx.sessionId) {
+      throw new Error('agents can only schedule into their own session — use --in-origin-session');
+    }
+    sessionId = explicit;
+  }
   const { session, row } = await createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
+    sessionId,
   });
   return toOutput(session, row);
 }
@@ -181,6 +215,11 @@ async function appendTaskLog(
     if (sess && sess.thread_id && isTaskThread(sess.thread_id)) {
       series = sess.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
       group ??= sess.agent_group_id;
+    } else if (sess) {
+      // Fork (§10): a task running inside a chat session (--in-origin-session) —
+      // the series is the task row this container is processing right now.
+      series = await firedSeriesInSession({ id: sess.id, agent_group_id: sess.agent_group_id });
+      if (series) group ??= sess.agent_group_id;
     }
   }
   if (!series) throw new Error('--id is required (no task session to derive it from)');
@@ -493,6 +532,10 @@ registerResource({
         `carries a --script gate (the script decides whether each fire needs you — a gated fire that\n` +
         `finds nothing costs zero tokens) or you pass --dangerously-override-recurrence-limit after\n` +
         `the user explicitly confirmed they want an ungated frequent task.\n\n` +
+        `Session choice: by default a task runs in its own isolated system session and must pick a delivery\n` +
+        `destination explicitly. Pass --in-origin-session to run it INSIDE the chat session you are in: every\n` +
+        `fire then wakes THIS conversation (same transcript, same memory of what the human said), which is what a\n` +
+        `per-thread watcher wants. Delivery still goes through send_message; the thread resolves from this session.\n\n` +
         `Failure backoff: a script that ERRORS repeatedly backs the series off (2,4,8,…60 min between fires; each errored fire counts as a failed run); after 8 consecutive failures the series is auto-paused with a note in its run log — fix the script, then \`ncl tasks resume <id>\`. A deliberate wakeAgent=false is a normal run and never backs off. \`ncl tasks get <id>\` shows failed_runs and the run log.`,
       args: [
         {
@@ -527,6 +570,18 @@ registerResource({
           name: 'group',
           type: 'string',
           description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
+        },
+        {
+          name: 'in_origin_session',
+          type: 'boolean',
+          description:
+            "Run the task INSIDE this chat session (the one creating it) instead of an isolated task session, so its wakes share this conversation's context and history. For per-thread watchers whose fires must know what the human said here. Agent callers only.",
+        },
+        {
+          name: 'session',
+          type: 'string',
+          description:
+            'Host callers: run the task inside this existing chat session id (same effect as --in-origin-session).',
         },
       ],
       examples: [

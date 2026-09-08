@@ -7,6 +7,7 @@ import {
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
+  getSession,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
 } from './db/sessions.js';
@@ -310,15 +311,29 @@ async function deliverMessage(
   // the only delivery path from a task session). Append to the series log,
   // never deliver. The caller marks it delivered so it isn't retried.
   if (msg.kind === 'task_log') {
+    let series: string | undefined;
     if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
-      const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+      series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+    } else {
+      // Fork (docs/CUSTOMIZATIONS.md §10): a task running inside a chat
+      // session (--in-origin-session) — the series is the task row this
+      // session most recently fired.
+      try {
+        series = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
+          mailbox.latestFiredTaskSeries(),
+        );
+      } catch (err) {
+        log.warn('task_log series lookup failed', { id: msg.id, sessionId: session.id, err });
+      }
+    }
+    if (series) {
       try {
         await appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
       }
     } else {
-      log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
+      log.warn('task_log row with no fired task in session — ignoring', { id: msg.id, sessionId: session.id });
     }
     return;
   }
@@ -387,6 +402,32 @@ async function deliverMessage(
       throw new Error(
         `messaging group ${mg.id} is detached (bot removed from ${mg.channel_type}/${mg.platform_id} at ${mg.detached_at})`,
       );
+    }
+    // Fork (docs/CUSTOMIZATIONS.md §9): task-session sends inherit the origin
+    // thread. Since the ncl-tasks migration, tasks run in a dedicated system
+    // session with no thread binding, so a send to a channel destination lands
+    // top-level — but the creating session (origin_session_id on the task row)
+    // is often a real Slack thread (e.g. game-gecko's per-game turn-watchers,
+    // whose advice belongs in the game's thread). When a task-session message
+    // has no explicit thread and the origin session is a thread-bound session
+    // on the SAME messaging group, deliver into the origin's thread. Explicit
+    // threadId from the agent always wins; cross-channel sends are never
+    // re-threaded; a closed/missing origin falls through to top-level.
+    if (!msg.threadId && session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
+      const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+      try {
+        const taskRow = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
+          mailbox.getTask(series),
+        );
+        const originId = taskRow ? (JSON.parse(taskRow.content).originSessionId as string | null) : null;
+        const origin = originId ? await getSession(originId) : undefined;
+        if (origin && origin.messaging_group_id === mg.id && origin.thread_id && !isTaskThread(origin.thread_id)) {
+          msg.threadId = origin.thread_id;
+          log.info('Task send inherited origin thread', { id: msg.id, series, threadId: origin.thread_id });
+        }
+      } catch (err) {
+        log.warn('Origin-thread lookup failed — delivering top-level', { id: msg.id, series, err });
+      }
     }
     const isOriginChat = session.messaging_group_id === mg.id;
     // Guarded: without the agent-to-agent module, `agent_destinations`

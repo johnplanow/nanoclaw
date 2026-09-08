@@ -224,6 +224,17 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     updateTask: (taskId, update) => updateTask(db, taskId, update),
     listLiveTasks: (status) => listLiveTasks(db, status),
     getTask: (taskId) => getTask(db, taskId),
+    // Fork (§10): newest fired task row in this session → its series.
+    latestFiredTaskSeries: () => {
+      const row = db
+        .prepare(
+          `SELECT id, series_id FROM messages_in
+            WHERE kind = 'task' AND status IN ('processing', 'completed', 'failed')
+            ORDER BY seq DESC LIMIT 1`,
+        )
+        .get() as { id: string; series_id: string | null } | undefined;
+      return row ? (row.series_id ?? row.id) : undefined;
+    },
     getTaskStats: (seriesId) => getTaskStats(db, seriesId),
     getCompletedRecurring: () =>
       getCompletedRecurring(db).map((row) => ({

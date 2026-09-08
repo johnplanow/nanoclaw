@@ -3,6 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { TIMEZONE } from '../../config.js';
 import type { TaskRecord } from '../../mailbox/index.js';
+import { getSession, isTaskThread } from '../../db/sessions.js';
 import { resolveTaskSession, withMailboxSession } from '../../session-manager.js';
 import { parseZonedToUtc } from '../../timezone.js';
 
@@ -128,14 +129,39 @@ export function prepareScheduledTask(input: {
   return { name: input.name, prompt: input.prompt, recurrence, script, processAfter };
 }
 
+// Fork (docs/CUSTOMIZATIONS.md §10): a task may run INSIDE an existing chat
+// session instead of its own system session (`options.sessionId`).
+// Motivation: a per-thread watcher (game-gecko's BGA turn advisor) that fires
+// in an isolated task session has no memory of the human's thread and vice
+// versa — two contexts advising one game, and they contradicted each other
+// (2026-09-02). The pre-ncl-tasks representation (task rows inside the
+// creating chat session) is still fully supported by the sweep, the container
+// gate, and recurrence — this only re-exposes it as an opt-in. Guard: the
+// session must exist, be active, belong to the group, and not be a task
+// system session.
+async function resolveHostSession(
+  agentGroupId: string,
+  sessionId: string,
+): Promise<{ id: string; agent_group_id: string }> {
+  const s = await getSession(sessionId);
+  if (!s || s.agent_group_id !== agentGroupId) throw new Error(`session not found: ${sessionId}`);
+  if (s.status !== 'active') throw new Error(`session is not active: ${sessionId}`);
+  if (isTaskThread(s.thread_id)) {
+    throw new Error(`session ${sessionId} is a task system session — omit --session to use one`);
+  }
+  return { id: s.id, agent_group_id: s.agent_group_id };
+}
+
 /** Persist a prepared task through NanoClaw's single task/session representation. */
 export async function createScheduledTask(
   agentGroupId: string,
   task: PreparedScheduledTask,
-  options?: { status?: 'pending' | 'paused'; originSessionId?: string | null },
+  options?: { status?: 'pending' | 'paused'; originSessionId?: string | null; sessionId?: string | null },
 ): Promise<{ session: { id: string; agent_group_id: string }; row: ScheduledTaskRow }> {
   const id = makeTaskId(task.name);
-  const { session } = await resolveTaskSession(agentGroupId, id);
+  const session = options?.sessionId
+    ? await resolveHostSession(agentGroupId, options.sessionId)
+    : (await resolveTaskSession(agentGroupId, id)).session;
 
   const row = await withMailboxSession(agentGroupId, session.id, async (db) => {
     await db.insertTask({

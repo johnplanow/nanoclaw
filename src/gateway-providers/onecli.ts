@@ -69,6 +69,18 @@ registerGatewayProvider('onecli', () => ({
       throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
     }
     log.info('OneCLI gateway applied', { agentGroupId: key.agentGroupId, sessionId: key.sessionId });
-    return contributionFromArgs(args, key.agentGroupId);
+    const contribution = contributionFromArgs(args, key.agentGroupId);
+    // Fork: exempt host-local / LAN backends from the OneCLI egress proxy.
+    // DO NOT REMOVE. Agent groups depend on backends the proxy must not touch:
+    // RSSBrew :8001 and Qdrant :6333 on VM 205 (192.168.1.205), Ollama :11434
+    // on aliera (192.168.1.110), plus anything on host.docker.internal.
+    // Through the proxy these time out or arrive with a rewritten Host header
+    // (RSSBrew's Django ALLOWED_HOSTS then 400s) — removing this broke the
+    // daily news brief on 2026-07-04. api.anthropic.com still routes via the
+    // proxy. Rides the typed gateway contribution so spec admission sees a
+    // plain (non-credential) value. See docs/CUSTOMIZATIONS.md §3.
+    const noProxy = 'host.docker.internal,localhost,127.0.0.1,192.168.1.205,192.168.1.110';
+    contribution.env = { ...(contribution.env ?? {}), NO_PROXY: noProxy, no_proxy: noProxy };
+    return contribution;
   },
 }));

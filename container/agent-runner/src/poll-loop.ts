@@ -33,6 +33,22 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from 
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+// Fork (docs/CUSTOMIZATIONS.md §12) — idle lifecycle. The stream deliberately
+// stays open between turns (cheap follow-ups) and the outer loop polls forever,
+// so without these an idle container's heartbeat goes stale after its last SDK
+// event and host-sweep's 30-min "absolute ceiling" reaps it as if it were stuck
+// (WARN + exit 143). Instead: end a stream that has produced no event for
+// IDLE_STREAM_END_MS with nothing pending, and exit the process cleanly once
+// the outer loop has had no work for IDLE_EXIT_MS (measured from the last
+// provider event). Both must stay well under ABSOLUTE_CEILING_MS. 0 disables.
+const DEFAULT_IDLE_STREAM_END_MS = 10 * 60 * 1000;
+const DEFAULT_IDLE_EXIT_MS = 15 * 60 * 1000;
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
 
 /** Consecutive driver-classified failures before a fresh runner is required. */
 const MAILBOX_FAILURE_STREAK_EXIT = 10;
@@ -63,10 +79,23 @@ export interface PollLoopConfig {
    * polling forever and stealing messages from the next test's DB.
    */
   signal?: AbortSignal;
+  /**
+   * Fork (§12): resolve the loop after this long with no messages processed.
+   * Default 15 min (env NANOCLAW_IDLE_EXIT_MS); 0 disables. index.ts turns a
+   * resolved loop into a clean process exit; the host respawns on next inbound.
+   */
+  idleExitMs?: number;
+  /**
+   * Fork (§12): end an open query stream after this long without a provider
+   * event when nothing is pending. Default 10 min (env
+   * NANOCLAW_IDLE_STREAM_END_MS); 0 disables.
+   */
+  idleStreamEndMs?: number;
 }
 
 /**
- * Main poll loop. Runs indefinitely until the process is killed.
+ * Main poll loop. Runs until the process is killed, the signal fires, or the
+ * loop has been idle for idleExitMs (then resolves so the process can exit 0).
  *
  * 1. Poll the mailbox for pending messages
  * 2. Format into prompt, call provider.query()
@@ -76,6 +105,9 @@ export interface PollLoopConfig {
  * 6. Loop
  */
 export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+  const idleExitMs = config.idleExitMs ?? envMs('NANOCLAW_IDLE_EXIT_MS', DEFAULT_IDLE_EXIT_MS);
+  const idleStreamEndMs = config.idleStreamEndMs ?? envMs('NANOCLAW_IDLE_STREAM_END_MS', DEFAULT_IDLE_STREAM_END_MS);
+  let lastWorkAt = Date.now();
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
   // provider decides how to use it (Claude resumes a .jsonl transcript,
@@ -119,6 +151,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     if (messages.length === 0) {
+      const idleMs = Date.now() - lastWorkAt;
+      if (idleExitMs > 0 && idleMs >= idleExitMs) {
+        log(`Idle for ${Math.round(idleMs / 60000)} min with nothing pending — exiting cleanly`);
+        return;
+      }
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
@@ -138,6 +175,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+    lastWorkAt = Date.now();
 
     const routing = extractRouting(messages);
 
@@ -253,7 +291,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
         config.provider.emitsMidTurnText === true,
+        batchHasUserChat(keep),
+        idleStreamEndMs,
       );
+      // Fork (§12): the idle clock runs from the last provider event, so a
+      // stream idle-ended at 10 min exits the loop at 15 min after the turn.
+      lastWorkAt = result.lastEventAt;
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -333,6 +376,18 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 
 interface QueryResult {
   continuation?: string;
+  /** Fork (§12): wall-clock ms of the last provider event — the loop's idle clock starts here. */
+  lastEventAt: number;
+}
+
+/**
+ * Fork (docs/CUSTOMIZATIONS.md §7): true when a batch contains real
+ * user-facing chat traffic (not operator on_wake / restart rows, scheduled
+ * tasks, or system messages). Such a turn owes the user a <message> reply —
+ * see reply enforcement in processQuery.
+ */
+function batchHasUserChat(messages: { kind: string; id: string }[]): boolean {
+  return messages.some((m) => (m.kind === 'chat' || m.kind === 'chat-sdk') && !m.id.startsWith('restart-'));
 }
 
 export async function processQuery(
@@ -353,10 +408,23 @@ export async function processQuery(
    * delivery-inert and the final result stays the single delivery door.
    */
   emitsMidTurnText = false,
+  initialHasUserChat = false,
+  idleStreamEndMs = DEFAULT_IDLE_STREAM_END_MS,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  let lastEventAt = Date.now();
   let unwrappedNudged = false;
+  // Fork (§7) — reply enforcement (2026-07-19 incident: agent repeatedly
+  // consumed user messages, then ended turns with an <internal>-only result —
+  // the wrapping nudge below never fired because hasUnwrapped requires a
+  // non-empty scratchpad, which stripInternalTags leaves empty). Once a user
+  // chat message enters the turn, the turn owes a delivered reply (a <message>
+  // block or a DB-visible send such as MCP send_message); an <internal>-only /
+  // zero-delivered result gets one corrective nudge, then we give up loudly.
+  // Distinct from task-block delivery (routing.taskRun path).
+  let replyNudged = false;
+  let pendingUserReply = initialHasUserChat;
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
@@ -407,14 +475,26 @@ export async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
+  let endedIdle = false;
   let mailboxFailureStreak = 0;
   const pollHandle = setInterval(() => {
-    if (done || pollInFlight || endedForCommand) return;
+    if (done || pollInFlight || endedForCommand || endedIdle) return;
     pollInFlight = true;
 
     void (async () => {
       try {
         const pending = getPendingMessages();
+
+        // Fork (§12) idle stream end: no provider event for idleStreamEndMs and
+        // nothing pending — end the input so the SDK closes the stream and the
+        // outer loop takes over (and can idle-exit). end() lets an in-flight
+        // turn finish; it never cuts a turn short.
+        if (idleStreamEndMs > 0 && pending.length === 0 && Date.now() - lastEventAt >= idleStreamEndMs) {
+          log(`Stream idle for ${Math.round((Date.now() - lastEventAt) / 60000)} min — ending query`);
+          endedIdle = true;
+          query.end();
+          return;
+        }
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -484,6 +564,8 @@ export async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
+        replyNudged = false;
+        if (batchHasUserChat(keep)) pendingUserReply = true;
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -523,6 +605,7 @@ export async function processQuery(
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+      lastEventAt = Date.now();
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
@@ -583,6 +666,7 @@ export async function processQuery(
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
             await deliverErrorResult(event.text, routing);
+            pendingUserReply = false; // the user got the error notice
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
@@ -598,11 +682,24 @@ export async function processQuery(
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            // Fork (§7): anything user-visible this turn — result-door blocks,
+            // mid-turn blocks, or DB-visible sends (MCP send_message rows past
+            // the turn's outbound high-water mark) — settles the owed reply.
+            const turnDelivered = sent > 0 || maxOutboundSeq() > turnStartSeq;
+            if (turnDelivered) pendingUserReply = false;
+            // <internal>-only results leave scratchpad empty, so hasUnwrapped
+            // misses them; if this turn consumed user chat, silence is still
+            // not acceptable — nudge once, then give up loudly.
+            const needsReplyNudge =
+              !willRetryWrapping && !routing.taskRun && pendingUserReply && !turnDelivered && !replyNudged;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+              status:
+                hasUnwrapped || willRetryTaskBlocks || (pendingUserReply && !turnDelivered && !routing.taskRun)
+                  ? 'undelivered'
+                  : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -612,8 +709,23 @@ export async function processQuery(
                 `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
                   `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
                   `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
+                  // Fork: re-send the FULL content (a resend that says "as above" is useless — the user saw nothing).
+                  `Re-send the FULL response content inside the block — the user saw NOTHING of your last output, so never refer to it (no "above", no "as I said"); include everything again.</system>`,
               );
+            } else if (needsReplyNudge) {
+              replyNudged = true;
+              const names = getAllDestinations()
+                .map((d) => d.name)
+                .join(', ');
+              log(`Reply enforcement: user message(s) consumed but nothing was sent — nudging agent`);
+              query.push(
+                `<system>This turn processed user message(s) but nothing was sent to the user. ` +
+                  `An <internal> note is not a reply, and narrating a response without a block does not send it. ` +
+                  `Every user message requires a user-facing response — even a one-line acknowledgment of what you did. ` +
+                  `Send it NOW inside <message to="name">...</message> with the FULL content — the user saw NOTHING unsent, so never reference it (no "above"). Your destinations: ${names}.</system>`,
+              );
+            } else if (pendingUserReply && !turnDelivered && !routing.taskRun) {
+              log(`ERROR: reply enforcement failed — user message(s) remain unanswered after nudge`);
             }
             if (willRetryTaskBlocks) {
               taskBlockNudged = true;
@@ -622,10 +734,10 @@ export async function processQuery(
                 .join(', ');
               query.push(buildTaskBlockNudge(taskBlocks, names));
             }
-            // A retry result (wrapping or task-block nudge) answers the SAME
-            // user prompt — keep it queued so the retry archives against it,
-            // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            // A retry result (wrapping, reply, or task-block nudge) answers the
+            // SAME user prompt — keep it queued so the retry archives against
+            // it, not the nudge text.
+            if (!willRetryWrapping && !needsReplyNudge && !willRetryTaskBlocks) archivePrompts.shift();
           }
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
@@ -656,7 +768,7 @@ export async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, lastEventAt };
 }
 
 function notifyExchangeComplete(

@@ -121,6 +121,14 @@ export interface InboundMailbox {
   getInboundHistory(limit: number): MailboxHistoryMessage[];
   getConversationRoot(): MailboxTimelineMessage | undefined;
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;
+  /**
+   * Fork (docs/CUSTOMIZATIONS.md §10): series of the task row most recently
+   * fired in THIS session — for a task that runs inside a chat session
+   * (--in-origin-session) rather than its own system session. A session
+   * processes one batch at a time, so the newest non-live task row is the run
+   * producing the current log line / append-log call.
+   */
+  latestFiredTaskSeries(): string | undefined;
 }
 
 /** Host-visible outbound mailbox behavior. Storage layout and lifecycle are implementation-private. */

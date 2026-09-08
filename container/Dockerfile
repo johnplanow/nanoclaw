@@ -45,6 +45,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libcups2 \
         libdrm2 \
         libxshmfence1 \
+        poppler-utils \
         ca-certificates \
         curl \
         git \

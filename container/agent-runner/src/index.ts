@@ -128,6 +128,10 @@ async function main(): Promise<void> {
   } finally {
     await mailbox.stop();
   }
+  // Fork (docs/CUSTOMIZATIONS.md §12): the loop only resolves on idle exit.
+  // Open handles (MCP servers, DB) would otherwise keep the process alive.
+  log('Poll loop finished — exiting 0');
+  process.exit(0);
 }
 
 main().catch((err) => {
