@@ -12,6 +12,11 @@ permissions:
 
 jobs:
   discover:
+    # Fork: the registry branches (`channels`, `providers`) live on upstream
+    # only; on the johnplanow fork `git fetch origin channels` fails, so the
+    # whole workflow is skipped here. Re-apply this guard on each upgrade
+    # (docs/CUSTOMIZATIONS.md §8).
+    if: github.repository != 'johnplanow/nanoclaw'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.skills.outputs.matrix }}

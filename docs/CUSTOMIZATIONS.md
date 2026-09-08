@@ -183,6 +183,12 @@ chat turns owing any reply). Not superseded by it.
 - `.claude/skills/migrate-nanoclaw/` — upstream's own version (ships on v2 main).
 - `.nanoclaw-migrations/` — the migration guide; keep, it documents this manifest's
   provenance and is the replay recipe for the next major migration.
+- `.github/workflows/registry-skills.yml` — upstream CI (v2.3.0+) that fetches
+  the `channels`/`providers` registry branches from `origin`; they don't exist
+  on the fork, so it failed on every push. Fork guard on the `discover` job:
+  `if: github.repository != 'johnplanow/nanoclaw'` (the `test` job needs it,
+  so both skip). Re-apply on upgrade; check any NEW upstream workflow with a
+  `push` trigger the same way (upstream main's `ci.yml` has one now).
 - `docs/CUSTOMIZATIONS.md` — this file.
 - `scripts/backup-snapshot.ts` — fork-only; the estate backup's consistent
   staging snapshot (DBs via online backup API, `groups/`, `.claude-shared`).
