@@ -19,7 +19,7 @@
  * so a concurrent estate pull sees either the old or the new snapshot.
  *
  * Usage: pnpm exec tsx scripts/backup-snapshot.ts
- * Cron: aliera user crontab 02:45 (estate pull runs after, ~03:15).
+ * Cron: host user crontab 02:45 (estate pull runs after, ~03:15).
  */
 import { execFileSync } from 'child_process';
 import fs from 'fs';
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         created: new Date().toISOString(),
-        host: 'aliera',
+        host: os.hostname(),
         source: PROJECT_ROOT,
         dbSnapshots: dbOk,
         dbFailures: dbFail,
