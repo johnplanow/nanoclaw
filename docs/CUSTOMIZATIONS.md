@@ -70,6 +70,10 @@ superseded by v2's session inbox/outbox + native `send_file` tool. Two gaps port
   `// Fork:` comments. **Conflict hotspot** — this file is upstream core.
 - **poppler-utils** in `container/Dockerfile` (PDF reading via pdftotext) —
   one line in the apt-get list.
+- **jq + python3** in the same apt list (added 2026-09-08 with the v2.3.0
+  upgrade): the movie-recs and book-recs specs' retrieval recipes pipe Qdrant /
+  Ollama JSON through `jq`, and the node:22-slim base ships neither — the
+  agents had been falling back to `node -e` for JSON all along.
 
 ## 3. NO_PROXY exemption for host-local backends (REINSTATED 2026-07-04)
 
