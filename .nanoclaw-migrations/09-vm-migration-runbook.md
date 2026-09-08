@@ -141,3 +141,16 @@ Two post-start defects, both fixed:
   recipe.
 - Dead-man ping from 206 timed out: Kuma on o11y gates 3001 via a
   DOCKER-USER allow-list; ansible session added .206 (add4301).
+
+### Day-1 defect (2026-09-08 morning): `.claude-shared` was not restored
+
+The 05:45 brief and the game-gecko turn-watchers failed all night with
+`No conversation found with session ID: …`. Cause: per-agent-group Claude
+state (`data/v2-sessions/<group>/.claude-shared/` — SDK transcripts,
+session-env; mounted at `/home/node/.claude`) was never in the backup
+snapshot, so 206 had none; only brand-new threads (fresh conversations)
+worked, which is why the cutover-night health checks passed. Fix: rsync'd
+all eight dirs from aliera (~56 MB, `--update`), added them to
+`scripts/backup-snapshot.ts` (1e106a88), re-fired the brief with
+`ncl tasks run`. Secondary defect to fix later: on that resume error the
+container hung until the 30-min heartbeat ceiling instead of exiting.
