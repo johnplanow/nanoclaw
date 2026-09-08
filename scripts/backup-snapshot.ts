@@ -2,7 +2,7 @@
  * scripts/backup-snapshot.ts — consistent backup staging for the estate backup.
  *
  * Produces an always-consistent snapshot of NanoClaw's mutable state at
- * STAGING (default /home/jplanow/nanoclaw-backups/staging). The estate backup
+ * STAGING (default $HOME/nanoclaw-backups/staging). The estate backup
  * (ops-vm cron -> backup_app.yml -> TrueNAS) copies THAT directory, never the
  * live files: v2.db is WAL-mode and the 162+ session DBs are written
  * continuously, so raw file copies can tear. SQLite files are snapshotted with
@@ -24,11 +24,12 @@
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
 import Database from 'better-sqlite3';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
-const STAGING = process.env.NANOCLAW_BACKUP_STAGING || '/home/jplanow/nanoclaw-backups/staging';
+const STAGING = process.env.NANOCLAW_BACKUP_STAGING || path.join(os.homedir(), 'nanoclaw-backups', 'staging');
 const TMP = `${STAGING}.tmp`;
 const OLD = `${STAGING}.old`;
 
