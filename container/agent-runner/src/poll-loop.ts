@@ -309,7 +309,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         batchHasUserChat(keep),
         idleStreamEndMs,
       );
-      lastWorkAt = Date.now();
+      // Idle clock runs from the last provider event, so a stream that was
+      // idle-ended at 10 min exits the loop at 15 min after the turn — not 25.
+      lastWorkAt = result.lastEventAt;
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -389,6 +391,8 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 
 interface QueryResult {
   continuation?: string;
+  /** Wall-clock ms of the last provider event — the loop's idle clock starts here, not at stream end. */
+  lastEventAt: number;
 }
 
 /**
@@ -688,7 +692,7 @@ export async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, lastEventAt };
 }
 
 function notifyExchangeComplete(
