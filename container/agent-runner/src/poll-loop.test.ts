@@ -4,7 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { isCorruptionError, processQuery, runPollLoop } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -610,4 +610,43 @@ describe('task-run turn wiring (real processQuery)', () => {
     // slow runners the test died as a mute timeout instead of reaching the
     // diagnostic throw above (observed consistently on CI-hosted runners).
   }, 20_000);
+});
+
+describe('idle lifecycle (clean exit instead of host ceiling kill)', () => {
+  const routing = { platformId: 'p', channelType: 'cli', threadId: null, inReplyTo: null } as any;
+
+  it('processQuery ends an open stream after idleStreamEndMs with nothing pending', async () => {
+    const provider = new MockProvider();
+    const query = provider.query({ prompt: 'hi', cwd: '/tmp' });
+    const started = Date.now();
+    // Mock stream stays open after the first result until end()/abort(); the
+    // idle-end poller (500ms cadence) must call end() once 600ms pass idle.
+    await Promise.race([
+      processQuery(query, routing, [], 'mock', undefined, 'hi', undefined, false, 600),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('stream never ended')), 5000)),
+    ]);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(500);
+  });
+
+  it('processQuery keeps the stream open while a follow-up is pending', async () => {
+    const provider = new MockProvider();
+    const query = provider.query({ prompt: 'hi', cwd: '/tmp' });
+    // trigger=0 rows never engage the query but they do count as "pending",
+    // so the idle-end must NOT fire; abort after 1.5s to finish the test.
+    insertMessage('ctx', 'chat', { sender: 'J', text: 'context only' }, { trigger: 0 });
+    setTimeout(() => query.abort(), 1500);
+    const started = Date.now();
+    await processQuery(query, routing, [], 'mock', undefined, 'hi', undefined, false, 600);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
+  });
+
+  it('runPollLoop resolves after idleExitMs with no work, after processing what was pending', async () => {
+    insertMessage('m1', 'chat', { sender: 'John', text: 'Hello' });
+    const provider = new MockProvider();
+    await Promise.race([
+      runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', idleExitMs: 1200, idleStreamEndMs: 600 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('loop never exited')), 8000)),
+    ]);
+    expect(getPendingMessages()).toHaveLength(0);
+  });
 });

@@ -223,3 +223,28 @@ a fresh gateway generates its own on first boot and then every restored secret
 fails to decrypt ("skipping secret: decryption failed" → agents get
 `401 No credentials configured`). Restore = pg_dump **and** that key file
 (same volume also holds the MITM CA at `gateway/ca.{key,pem}`).
+
+## 12. Agent-runner idle lifecycle: clean exit instead of host ceiling kill (2026-09-08)
+
+**Fork block.** `container/agent-runner/src/poll-loop.ts` + `index.ts`.
+Upstream keeps the SDK stream open between turns and the outer loop polls
+forever; the heartbeat is only touched on stream events (and pre-task
+scripts). So every idle chat container went stale and was reaped by
+host-sweep's 30-min `ABSOLUTE_CEILING_MS` — logged as
+`WARN Killing container past absolute ceiling` + `Container exited non-zero
+code=143` (256 times in aliera's log), indistinguishable from a real hang.
+
+Now: with nothing pending, a stream that has produced no provider event for
+`idleStreamEndMs` (default 10 min, env `NANOCLAW_IDLE_STREAM_END_MS`) is
+`end()`ed (in-flight turns finish first), and a loop with no work for
+`idleExitMs` (default 15 min, env `NANOCLAW_IDLE_EXIT_MS`) resolves →
+`index.ts` exits 0 → host logs `Container exited` at INFO and respawns on the
+next inbound. `0` disables either. The host ceiling stays as the real-hang
+safety net. Warm-container benefit (no SDK respawn) is kept for follow-ups
+inside 10 min; game-gecko watchers (*/15) may now respawn per tick — that is
+the "empty polls cost only a spawn" contract already assumed by turn_poll.sh.
+Tests: `poll-loop.test.ts` › "idle lifecycle".
+
+Reapply on upgrade: re-add the two config fields, `lastWorkAt`/`lastEventAt`
+tracking, the idle-end branch in the follow-up poller, and the `process.exit(0)`
+after `runPollLoop` in `index.ts`.

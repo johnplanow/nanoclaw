@@ -121,6 +121,10 @@ async function main(): Promise<void> {
     cwd: CWD,
     systemContext: { instructions },
   });
+  // The loop only resolves on idle exit (PollLoopConfig.idleExitMs). Open
+  // handles (MCP servers, DB) would otherwise keep the process alive.
+  log('Poll loop finished — exiting 0');
+  process.exit(0);
 }
 
 main().catch((err) => {

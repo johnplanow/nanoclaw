@@ -29,6 +29,22 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from 
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+// Idle lifecycle. The stream deliberately stays open between turns (cheap
+// follow-ups), and the outer loop polls forever — so without these, an idle
+// container's heartbeat goes stale after its last SDK event and the host's
+// 30-min "absolute ceiling" reaps it as if it were stuck (WARN + exit 143,
+// 256 times in the aliera log). Instead: end a stream that has produced no
+// event for IDLE_STREAM_END_MS with nothing pending, and exit the process
+// cleanly once the outer loop has had no work for IDLE_EXIT_MS. Both must stay
+// well under host-sweep's ABSOLUTE_CEILING_MS (30 min). 0 disables.
+const DEFAULT_IDLE_STREAM_END_MS = 10 * 60 * 1000;
+const DEFAULT_IDLE_EXIT_MS = 15 * 60 * 1000;
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
 
 /**
  * Number of consecutive `database disk image is malformed` errors after which
@@ -80,10 +96,23 @@ export interface PollLoopConfig {
    * polling forever and stealing messages from the next test's DB.
    */
   signal?: AbortSignal;
+  /**
+   * Resolve the loop after this long with no messages processed. Default
+   * 15 min (env NANOCLAW_IDLE_EXIT_MS); 0 disables. index.ts turns a resolved
+   * loop into a clean process exit; the host respawns on the next inbound.
+   */
+  idleExitMs?: number;
+  /**
+   * End an open query stream after this long without a provider event when
+   * nothing is pending. Default 10 min (env NANOCLAW_IDLE_STREAM_END_MS); 0
+   * disables.
+   */
+  idleStreamEndMs?: number;
 }
 
 /**
- * Main poll loop. Runs indefinitely until the process is killed.
+ * Main poll loop. Runs until the process is killed, the signal fires, or the
+ * loop has been idle for idleExitMs (then resolves so the process can exit 0).
  *
  * 1. Poll messages_in for pending rows
  * 2. Format into prompt, call provider.query()
@@ -93,6 +122,9 @@ export interface PollLoopConfig {
  * 6. Loop
  */
 export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+  const idleExitMs = config.idleExitMs ?? envMs('NANOCLAW_IDLE_EXIT_MS', DEFAULT_IDLE_EXIT_MS);
+  const idleStreamEndMs = config.idleStreamEndMs ?? envMs('NANOCLAW_IDLE_STREAM_END_MS', DEFAULT_IDLE_STREAM_END_MS);
+  let lastWorkAt = Date.now();
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
   // provider decides how to use it (Claude resumes a .jsonl transcript,
@@ -136,6 +168,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     if (messages.length === 0) {
+      const idleMs = Date.now() - lastWorkAt;
+      if (idleExitMs > 0 && idleMs >= idleExitMs) {
+        log(`Idle for ${Math.round(idleMs / 60000)} min with nothing pending — exiting cleanly`);
+        return;
+      }
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
@@ -155,6 +192,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+    lastWorkAt = Date.now();
 
     const routing = extractRouting(messages);
 
@@ -269,7 +307,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
         batchHasUserChat(keep),
+        idleStreamEndMs,
       );
+      lastWorkAt = Date.now();
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -371,9 +411,11 @@ export async function processQuery(
   initialPrompt: string,
   initialContinuation: string | undefined,
   initialHasUserChat = false,
+  idleStreamEndMs = DEFAULT_IDLE_STREAM_END_MS,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  let lastEventAt = Date.now();
   let unwrappedNudged = false;
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
@@ -404,14 +446,26 @@ export async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
+  let endedIdle = false;
   let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
-    if (done || pollInFlight || endedForCommand) return;
+    if (done || pollInFlight || endedForCommand || endedIdle) return;
     pollInFlight = true;
 
     void (async () => {
       try {
         const pending = getPendingMessages();
+
+        // Idle stream end: no provider event for idleStreamEndMs and nothing
+        // pending — end the input so the SDK closes the stream and the outer
+        // loop takes over (and can idle-exit). end() lets an in-flight turn
+        // finish; it never cuts a turn short.
+        if (idleStreamEndMs > 0 && pending.length === 0 && Date.now() - lastEventAt >= idleStreamEndMs) {
+          log(`Stream idle for ${Math.round((Date.now() - lastEventAt) / 60000)} min — ending query`);
+          endedIdle = true;
+          query.end();
+          return;
+        }
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -521,6 +575,7 @@ export async function processQuery(
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+      lastEventAt = Date.now();
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
