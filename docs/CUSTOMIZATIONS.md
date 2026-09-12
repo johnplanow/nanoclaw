@@ -101,7 +101,7 @@ The GPT-Researcher sidecar and everything that existed to serve it were
 retired the same day as the pipeline v2 overhaul, after an instrumented
 engine A/B (eval q6) showed the sidecar contributed **zero verifiable
 sources** — full evidence in
-`groups/slack_gpt-researcher/evals/results/2026-07-03-pipeline-v2-initial.md`.
+`groups/gpt-researcher/evals/results/2026-07-03-pipeline-v2-initial.md`.
 The research core is now the native orchestrator-worker pipeline (no extra
 infrastructure).
 
