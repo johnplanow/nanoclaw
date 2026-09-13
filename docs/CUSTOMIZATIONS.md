@@ -179,6 +179,11 @@ chat turns owing any reply). Not superseded by it.
 
 - `.gitignore` — fork additions: `_bmad/`, `.claude/skills/bmad-*/` (BMAD tooling
   is local-only, intentionally untracked).
+  Also `groups/` (2026-09-13): `groups/` is a nested git repo (private
+  `johnplanow/nanoclaw-agents`, the consolidated agent-code repo). Upstream's
+  `groups/*` ignores the contents, but git reports a nested repo as the directory
+  entry itself, which `groups/*` does not match — so `git status` showed
+  `?? groups/` until the extra line.
 - `.claude/skills/x-integration/` — carried from v1 (dropped upstream in v2).
 - `.claude/skills/migrate-nanoclaw/` — upstream's own version (ships on v2 main).
 - `.nanoclaw-migrations/` — the migration guide; keep, it documents this manifest's

@@ -13,6 +13,8 @@ logs/
 
 # Groups - per-installation state, not tracked
 groups/*
+groups/
+# ^ fork addition: groups/ is a nested git repo (johnplanow/nanoclaw-agents); upstream's groups/* ignores the contents but a nested repo is reported as the dir entry itself
 
 # Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
 # per-group memory (CLAUDE.local.md) must never be committed.
