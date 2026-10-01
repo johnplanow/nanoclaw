@@ -193,6 +193,9 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     concurrency: 'concurrent',
     supportsThreads: true,
     defaults: SLACK_DEFAULTS,
+    // Fork: Slack rejects markdown blocks over 12k chars (msg_too_long) —
+    // split below that with headroom.
+    maxTextLength: 11000,
   });
   bridge.resolveChannelName = async (platformId: string) => {
     try {
