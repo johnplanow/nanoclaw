@@ -428,6 +428,14 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
+  // Task runs: <message> blocks seen in streamed text this turn. Inert (task
+  // runs deliver only via send_message), but collected so the result-time
+  // task-block nudge also covers a block composed BEFORE trailing tool calls
+  // — the final result only carries the last assistant text, so without this
+  // such a block vanished with no nudge (2026-10-08/09 ai-news-daily: the
+  // whole brief went out as a mid-turn block, then persistence tool calls,
+  // then a bare summary). Reset at the turn boundary.
+  let midTurnTaskBlocks: TaskMessageBlock[] = [];
   // How many <message> blocks were delivered from 'text' events this turn
   // (chat runs, emitsMidTurnText providers only). A frame-local count, never
   // keyed by content: it feeds the result door's nudge decision ("did this
@@ -624,7 +632,11 @@ export async function processQuery(
         // provider's static capability: for a provider that does not declare
         // emitsMidTurnText the result stays the only delivery door, so a
         // stray text event must not open a second one.
-        if (emitsMidTurnText) {
+        if (routing.taskRun) {
+          const scan = collectTaskTextBlocks(event.text, midTurnTail, turnStartSeq);
+          midTurnTaskBlocks.push(...scan.blocks);
+          midTurnTail = scan.tail;
+        } else if (emitsMidTurnText) {
           const scan = await deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail);
           midTurnSent += scan.delivered;
           midTurnTail = scan.tail;
@@ -653,7 +665,8 @@ export async function processQuery(
             // and the retry streams through the mid-turn door.
             turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
           });
-          const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
+          const allTaskBlocks = mergeTaskBlocks(midTurnTaskBlocks, taskBlocks);
+          const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, allTaskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
@@ -732,13 +745,21 @@ export async function processQuery(
               const names = getAllDestinations()
                 .map((d) => d.name)
                 .join(', ');
-              query.push(buildTaskBlockNudge(taskBlocks, names));
+              query.push(buildTaskBlockNudge(allTaskBlocks, names));
             }
             // A retry result (wrapping, reply, or task-block nudge) answers the
             // SAME user prompt — keep it queued so the retry archives against
             // it, not the nudge text.
             if (!willRetryWrapping && !needsReplyNudge && !willRetryTaskBlocks) archivePrompts.shift();
           }
+        } else if (shouldNudgeTaskBlocks(routing.taskRun, midTurnTaskBlocks, taskBlockNudged)) {
+          // Empty final text, but the turn streamed inert task blocks — same
+          // nudge as above; the retry answers the same prompt.
+          taskBlockNudged = true;
+          const names = getAllDestinations()
+            .map((d) => d.name)
+            .join(', ');
+          query.push(buildTaskBlockNudge(midTurnTaskBlocks, names));
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
@@ -750,6 +771,7 @@ export async function processQuery(
         // buffer dies with the turn: a fragment that never closed is not
         // carried into the next turn — the wrap-nudge owns that case.
         midTurnSent = 0;
+        midTurnTaskBlocks = [];
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
       }
@@ -886,7 +908,8 @@ const INTERNAL_SPAN_RE = /<internal\b[\s\S]*?<\/internal>/gi;
  * would otherwise never be seen (and the unwrapped-nudge would coax out only
  * a mangled re-send of the final fragment). Chat runs only — in task runs
  * mid-turn blocks stay inert exactly like final-text blocks (one-door: only
- * the send_message tool delivers). Blocks inside an <internal> span are never
+ * the send_message tool delivers; collectTaskTextBlocks gathers them for the
+ * task-block nudge instead). Blocks inside an <internal> span are never
  * delivered. Blocks to unknown destinations are left for the result path,
  * which logs the drop into the scratchpad and lets the nudge decide.
  *
@@ -968,6 +991,52 @@ export async function deliverMidTurnBlocks(
     log(`Mid-turn delivery: <message to="${toName}"> (${body.length} chars)`);
   }
   return { delivered, tail };
+}
+
+/**
+ * Task runs: collect the complete <message> blocks in a streamed text
+ * segment WITHOUT delivering them (one-door: only send_message delivers), so
+ * the result-time task-block nudge can surface them. Same cross-segment
+ * assembly and <internal> exclusion as deliverMidTurnBlocks. A block whose
+ * exact body already went to the same destination this turn (the agent sent
+ * it via send_message, then echoed it) is skipped — nothing to correct.
+ */
+export function collectTaskTextBlocks(
+  text: string,
+  carry = '',
+  turnStartSeq?: number,
+): { blocks: TaskMessageBlock[]; tail: string } {
+  const input = carry + text;
+  const tailStart = unresolvedTailStart(input);
+  const visible = input.slice(0, tailStart).replace(INTERNAL_SPAN_RE, '');
+  const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+  const blocks: TaskMessageBlock[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = MESSAGE_RE.exec(visible)) !== null) {
+    const to = match[1];
+    const body = stripHarnessTagArtifacts(match[2].trim());
+    if (!body) continue;
+    const dest = findByName(to);
+    if (dest && turnStartSeq !== undefined && wasWrittenInSeqWindow(dest, body, turnStartSeq, maxOutboundSeq())) {
+      continue;
+    }
+    log(`Task run: mid-turn <message to="${to}"> block not delivered — task sessions send only via explicit tools`);
+    blocks.push({ to, body });
+  }
+  return { blocks, tail: input.slice(tailStart) };
+}
+
+/** Concatenate task-block lists, dropping exact (to, body) repeats — the final text also streams as a text event. */
+export function mergeTaskBlocks(...lists: TaskMessageBlock[][]): TaskMessageBlock[] {
+  const seen = new Set<string>();
+  const out: TaskMessageBlock[] = [];
+  for (const block of lists.flat()) {
+    const key = `${block.to}\u0000${block.body}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(block);
+  }
+  return out;
 }
 
 const OPEN_INTERNAL_RE = /<internal\b/i;

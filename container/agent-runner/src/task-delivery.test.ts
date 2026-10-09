@@ -10,7 +10,14 @@ import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getTaskSeriesId } from './db/session-routing.js';
 import { sendFile, sendMessage } from './mcp-tools/core.js';
-import { autoAppendTaskLog, buildTaskBlockNudge, dispatchResultText, shouldNudgeTaskBlocks } from './poll-loop.js';
+import {
+  autoAppendTaskLog,
+  buildTaskBlockNudge,
+  collectTaskTextBlocks,
+  dispatchResultText,
+  mergeTaskBlocks,
+  shouldNudgeTaskBlocks,
+} from './poll-loop.js';
 import type { RoutingContext } from './formatter.js';
 
 function seedSessionRouting(channelType: string | null, platformId: string | null, threadId: string | null): void {
@@ -181,6 +188,43 @@ describe('final-output blocks in a task run', () => {
     }[];
     expect(rows).toHaveLength(1);
     expect(JSON.parse(rows[0].content).text).toContain('[undelivered → family] digest');
+  });
+});
+
+describe('mid-turn blocks in a task run', () => {
+  it('collects them inert — a brief composed before trailing tool calls is not lost', () => {
+    const { blocks, tail } = collectTaskTextBlocks(
+      'Sending now.\n\n<message to="family">the brief</message>\n\nNow persisting.',
+      '',
+      0,
+    );
+
+    expect(blocks).toEqual([{ to: 'family', body: 'the brief' }]);
+    expect(tail).toBe('');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(shouldNudgeTaskBlocks(true, mergeTaskBlocks(blocks, []), false)).toBe(true);
+  });
+
+  it('assembles a block split across text events and skips <internal> drafts', () => {
+    const first = collectTaskTextBlocks('<internal><message to="family">draft</message></internal><message to="fam');
+    expect(first.blocks).toEqual([]);
+    const second = collectTaskTextBlocks('ily">final</message>', first.tail);
+    expect(second.blocks).toEqual([{ to: 'family', body: 'final' }]);
+    expect(second.tail).toBe('');
+  });
+
+  it('skips a block whose exact body was already sent to that destination this turn', async () => {
+    await sendMessage.handler({ to: 'family', text: 'the brief' });
+    const { blocks } = collectTaskTextBlocks('<message to="family">the brief</message>', '', 0);
+    expect(blocks).toEqual([]);
+  });
+
+  it('dedupes the final text, which also streams as a text event', () => {
+    const block = { to: 'family', body: 'digest' };
+    expect(mergeTaskBlocks([block], [{ ...block }], [{ to: 'ops', body: 'digest' }])).toEqual([
+      block,
+      { to: 'ops', body: 'digest' },
+    ]);
   });
 });
 
