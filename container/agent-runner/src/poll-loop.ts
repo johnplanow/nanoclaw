@@ -741,8 +741,7 @@ export async function processQuery(
           // Completed partial output remains deliverable, but an explicit
           // provider failure must keep its status and never trigger a retry.
           const allTaskBlocks = mergeTaskBlocks(midTurnTaskBlocks, taskBlocks);
-          const willRetryTaskBlocks =
-            !failed && shouldNudgeTaskBlocks(routing.taskRun, allTaskBlocks, taskBlockNudged);
+          const willRetryTaskBlocks = !failed && shouldNudgeTaskBlocks(routing.taskRun, allTaskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
@@ -778,11 +777,7 @@ export async function processQuery(
             prompt: archivePrompts[0] ?? initialPrompt,
             result: archivedResult,
             continuation: queryContinuation ?? initialContinuation,
-            status: failed
-              ? 'error'
-              : hasUnwrapped || willRetryTaskBlocks || replyOwed
-                ? 'undelivered'
-                : 'completed',
+            status: failed ? 'error' : hasUnwrapped || willRetryTaskBlocks || replyOwed ? 'undelivered' : 'completed',
           });
           if (willRetryWrapping) {
             unwrappedNudged = true;
@@ -805,7 +800,7 @@ export async function processQuery(
                     `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
                     `Your destinations: ${names}. ` +
                     // Fork: re-send the FULL content (a resend that says "as above" is useless — the user saw nothing).
-                    `Re-send the FULL response content inside the block — the user saw NOTHING of your last output, so never refer to it (no "above", no "as I said"); include everything again.</system>`,
+                    `Please re-send the FULL response content inside the block — the user saw NOTHING of your last output, so never refer to it (no "above", no "as I said"); include everything again.</system>`,
               { after: turnStartSeq, upto: maxOutboundSeq() },
             );
           } else if (needsReplyNudge) {

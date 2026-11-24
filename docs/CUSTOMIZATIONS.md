@@ -5,7 +5,13 @@ This fork (`johnplanow/nanoclaw`) carries local customizations on top of upstrea
 upstream updates can be taken with full knowledge of what is ours, why it exists,
 and what can be dropped if upstream ships an equivalent.
 
-**Fork baseline (since 2026-09-08 v2.3.0 upgrade):** upstream `v2.3.0` tag
+**Fork baseline (since 2026-11-23):** upstream `v2026.11.0` taken with the
+transactional `/update-nanoclaw` controller as a **merge** (594 upstream
+commits; stable channel). What moved in that round is recorded in
+"v2026.11.0 update notes" at the end of this file — read it before the next
+update, because three fork patches changed home.
+
+**Previous baseline (2026-09-08 v2.3.0 upgrade):** upstream `v2.3.0` tag
 (`54d9d9a5`) with the fork customizations reapplied on top via the intent-based
 `/migrate-nanoclaw` flow — NOT a merge. The full record (reapply order,
 breaking-change matrix, runtime steps) lives in
@@ -307,3 +313,36 @@ Tests: `poll-loop.test.ts` › "idle lifecycle".
 Reapply on upgrade: re-add the two config fields, `lastWorkAt`/`lastEventAt`
 tracking, the idle-end branch in the follow-up poller, and the `process.exit(0)`
 after `runPollLoop` in `index.ts`.
+
+## v2026.11.0 update notes (2026-11-23)
+
+Taken with `/update-nanoclaw` (merge, stable channel = tag `v2026.11.0`).
+The updater re-copies every installed channel/gateway payload on each run, so
+**fork patches may no longer live inside payload files** (`src/channels/slack*.ts`,
+`src/gateway-providers/onecli*.ts`) — they are silently overwritten. Moves:
+
+- **§1 👀 thinking indicator** → fork-owned `src/channels/slack-thinking.ts`
+  (+ test), wired by one barrel line in `src/channels/index.ts`. It re-registers
+  the default `slack` adapter with a decorated factory and calls Slack's
+  `reactions.add/remove` Web API directly with `SLACK_BOT_TOKEN`. `slack.ts` is
+  now pristine channels-branch HEAD (adapter 4.41.1); the `c3f900f4` pin and
+  the fork's 11k `maxTextLength` patch are gone (upstream splits at 10k itself).
+- **§3 NO_PROXY** → `src/container-runner.ts`, right after `contributedEnv` is
+  assembled (OneCLI is now the skill-installed `/add-onecli` payload). Merged
+  into whatever the gateway already exempts. Still DO NOT REMOVE.
+- **§7 reply enforcement, §12 idle lifecycle, task-run mid-turn block nudge**
+  (`container/agent-runner/src/poll-loop.ts`): re-implemented on upstream's
+  queued-turn structure. `processQuery`'s fork params now follow `signal`
+  (`initialHasUserChat`, `idleStreamEndMs`); reply-enforcement state
+  (`pendingUserReply`, `replyNudged`) travels on `QueuedTurn`; nudges go through
+  `pushRetry`. "Delivered this turn" = door blocks or any chat row in the
+  turn's outbound window. Upstream still has no equivalent of any of the three.
+- **§2 attachment cap**: same place, now measured on `byteLength` (upstream's
+  `fetchData` may return an ArrayBuffer / Uint8Array).
+- **§8 registry-skills.yml guard**: upstream's jobs no longer hang off
+  `discover`, so the `github.repository != 'johnplanow/nanoclaw'` guard is on
+  every job (`always() && …` on the two gate jobs).
+- **§8 pins dropped**: `claude-code` 2.1.321 / `claude-agent-sdk` ^0.3.321 are
+  upstream's; `mcp-remote@0.1.38` stays in `container/cli-tools.json`.
+- Host test `src/group-skills.test.ts` assumes umask 022 — run the updater's
+  `validate` under `umask 022` on aliera (default 002).

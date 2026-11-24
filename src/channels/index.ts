@@ -8,4 +8,5 @@
 
 import './cli.js';
 import './slack.js';
+import './slack-thinking.js'; // Fork: 👀 thinking indicator — re-registers 'slack' decorated (docs/CUSTOMIZATIONS.md §1)
 import './slack-a2a-guard.js';
