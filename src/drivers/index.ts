@@ -40,9 +40,11 @@ import os from 'os';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
-import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from '../egress-lockdown.js';
+import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork, onEgressNetworkOnly } from '../egress-lockdown.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import '../provider-contracts/index.js';
+import { protectedProviderDocumentSourcePaths } from '../provider-contracts/realize.js';
 
 import { DockerSessionDriver, agentContainerName } from './docker-driver.js';
 import {
@@ -76,16 +78,28 @@ export function readSetting(key: (typeof SETTINGS)[number], env: NodeJS.ProcessE
  * states the intent, this realizes it, and nothing rides between them.
  */
 function dockerNetworkArgs(spec: SessionSpec): string[] {
-  if (ensureEgressNetwork()) {
+  if (spec.networkAccess.target.kind === 'session-container') return [];
+  if (ensureEgressNetwork(spec.networkAccess)) {
     log.info('Egress lockdown active', { containerName: agentContainerName(spec), network: EGRESS_NETWORK });
     return egressNetworkArgs();
   }
-  return os.platform() === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : [];
+  return os.platform() === 'linux' ? [`--add-host=${spec.networkAccess.endpoint}:host-gateway`] : [];
 }
 
 registerSessionDriver(
   DEFAULT_DRIVER_KIND,
-  (policy) => new DockerSessionDriver({ ...policy, networkArgsFor: dockerNetworkArgs }),
+  (policy) =>
+    new DockerSessionDriver({
+      ...policy,
+      networkArgsFor: dockerNetworkArgs,
+      // An adopted container keeps the network it was spawned with. Under
+      // lockdown it must match what dockerNetworkArgs gives a new one.
+      reconcileNetworkAccess: (access, attachedNetworks) => {
+        if (access.target.kind === 'session-container') return 'kept';
+        if (!ensureEgressNetwork(access)) return 'kept';
+        return onEgressNetworkOnly(attachedNetworks()) ? 'kept' : 'restart';
+      },
+    }),
 );
 
 export function configuredDriverKind(env: NodeJS.ProcessEnv = process.env): DriverKind {
@@ -109,7 +123,10 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     surfaceRoots: [
       path.join(projectRoot, 'container', 'agent-runner', 'src'),
       path.join(projectRoot, 'container', 'skills'),
-      path.join(projectRoot, 'container', 'CLAUDE.md'),
+      // Base documents are read by the host composer, not mounted. Declared
+      // protected sources stay here so an overlapping operator mount cannot
+      // make prompt-defining install content writable.
+      ...protectedProviderDocumentSourcePaths(projectRoot),
     ],
     // Must resolve to the same path an egress overlay's provisioner writes
     // material to, and a provisioner reads this key from `.env`. Reading it
@@ -118,14 +135,29 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     // identity-material mount is denied by a policy naming a path that looks
     // correct.
     materialsRoot: readSetting('NANOCLAW_SESSION_MATERIAL_ROOT', env) || path.join(DATA_DIR, 'session-materials'),
+    gatewayTrustRoot: path.join(DATA_DIR, 'gateway-trust'),
   };
 }
 
 let installed: SessionEventsDriver | null = null;
+let installedPolicy: MountPolicy | null = null;
 
 export function getSessionDriver(): SessionEventsDriver {
-  if (!installed) installed = createSessionDriver(configuredDriverKind());
+  if (!installed) {
+    const policy = mountPolicy();
+    installed = createSessionDriver(configuredDriverKind(), policy);
+    installedPolicy = policy;
+  }
   return installed;
+}
+
+/**
+ * The policy the selected driver enforces, read once when it was selected, so
+ * a check made before a start agrees with the start. A `.env` edit applies on
+ * restart for both. Before a driver is selected, a fresh read.
+ */
+export function sessionMountPolicy(): MountPolicy {
+  return installedPolicy ?? mountPolicy();
 }
 
 export function createSessionDriver(kind: DriverKind, overrides: Partial<MountPolicy> = {}): SessionEventsDriver {
@@ -150,11 +182,22 @@ export function createSessionDriver(kind: DriverKind, overrides: Partial<MountPo
   return driver;
 }
 
+/**
+ * The already-selected driver, or null — never instantiates. For consumers
+ * that must arm only when a runtime is actually in use: the boot sequence
+ * selects the driver before the sweep starts, while a unit suite that never
+ * selected one sees null instead of triggering selection as a side effect.
+ */
+export function peekSessionDriver(): SessionEventsDriver | null {
+  return installed;
+}
+
 /** Test seam: drop the memoized driver so a suite can select another one. */
 export function resetSessionDriver(next: SessionDriver | null = null): void {
   // Tests may inject raw fakes; the probe (isSessionEventsDriver) guards resync,
   // and fake handles carry their own onTerminal where flows need it.
   installed = next as SessionEventsDriver | null;
+  installedPolicy = null;
 }
 
 export * from './driver-registry.js';

@@ -24,10 +24,10 @@ import {
   getPendingApproval,
   markApprovalAwaitingReason,
 } from '../../db/sessions.js';
+import { wakeContainer } from '../../container-runner.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { upsertUser } from '../permissions/db/users.js';
-import { upsertUserDm } from '../permissions/db/user-dms.js';
 import { grantRole } from '../permissions/db/user-roles.js';
 import { REJECT_WITH_REASON_VALUE } from './primitive.js';
 
@@ -48,40 +48,57 @@ vi.mock('../../session-manager.js', async () => {
 const TEST_DIR = '/tmp/nanoclaw-test-reject-reason';
 const DM_CHANNEL = 'slack';
 const DM_PLATFORM = 'D-admin-1';
+const DM_INSTANCE = 'slack-secondary';
 
 function now(): string {
   return new Date().toISOString();
 }
 
-let delivered: Array<{ channelType: string; platformId: string; content: string }>;
+let delivered: Array<{
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+  content: string;
+  instance?: string;
+}>;
+
+/** A test can hold the next delivery until it releases it. */
+let deliverHold: Promise<void> | undefined;
 
 const fakeAdapter: ChannelDeliveryAdapter = {
-  async deliver(channelType, platformId, _threadId, _kind, content) {
-    delivered.push({ channelType, platformId, content });
+  async deliver(channelType, platformId, threadId, _kind, content, _files, instance) {
+    const hold = deliverHold;
+    deliverHold = undefined;
+    await hold;
+    delivered.push({ channelType, platformId, threadId, content, instance });
     return 'pm-1';
   },
 };
 
-async function seedApproval(approvalId: string, action = 'create_agent'): Promise<void> {
+async function seedApproval(approvalId: string, action = 'create_agent', sessionId = 'sess-1'): Promise<void> {
   await createPendingApproval({
     approval_id: approvalId,
-    session_id: 'sess-1',
+    session_id: sessionId,
     request_id: approvalId,
     action,
     payload: JSON.stringify({ name: 'child' }),
     created_at: now(),
+    channel_type: DM_CHANNEL,
+    platform_id: DM_PLATFORM,
+    instance: DM_INSTANCE,
     title: 'Approval',
     options_json: JSON.stringify([]),
   });
 }
 
-function dmReply(text?: string): InboundEvent {
+function dmReply(text?: string, threadId: string | null = null): InboundEvent {
   const content: Record<string, unknown> = { sender: 'admin-1', senderId: 'admin-1' };
   if (text !== undefined) content.text = text;
   return {
     channelType: DM_CHANNEL,
+    instance: DM_INSTANCE,
     platformId: DM_PLATFORM,
-    threadId: null,
+    threadId,
     message: { id: 'm-1', kind: 'chat', content: JSON.stringify(content), timestamp: now() },
   };
 }
@@ -94,7 +111,7 @@ async function clickRejectWithReason(approvalId: string): Promise<void> {
     value: REJECT_WITH_REASON_VALUE,
     userId: 'admin-1',
     channelType: DM_CHANNEL,
-    platformId: '', // not surfaced by the click payload — resolved via ensureUserDm
+    platformId: DM_PLATFORM,
     threadId: null,
   });
 }
@@ -127,8 +144,7 @@ beforeEach(async () => {
     created_at: now(),
   });
 
-  // Authorized approver + a cached DM so ensureUserDm resolves without a
-  // platform openDM call.
+  // Authorized approver for the stored delivery address.
   await upsertUser({ id: 'slack:admin-1', kind: 'slack', display_name: 'Admin', created_at: now() });
   await grantRole({
     user_id: 'slack:admin-1',
@@ -137,22 +153,6 @@ beforeEach(async () => {
     granted_by: null,
     granted_at: now(),
   });
-  await createMessagingGroup({
-    id: 'mg-dm-1',
-    channel_type: DM_CHANNEL,
-    platform_id: DM_PLATFORM,
-    name: 'Admin DM',
-    is_group: 0,
-    unknown_sender_policy: 'strict',
-    created_at: now(),
-  });
-  await upsertUserDm({
-    user_id: 'slack:admin-1',
-    channel_type: DM_CHANNEL,
-    messaging_group_id: 'mg-dm-1',
-    resolved_at: now(),
-  });
-
   setDeliveryAdapter(fakeAdapter);
 });
 
@@ -174,6 +174,8 @@ describe('reject with reason', () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0].channelType).toBe(DM_CHANNEL);
     expect(delivered[0].platformId).toBe(DM_PLATFORM);
+    expect(delivered[0].instance).toBe(DM_INSTANCE);
+    expect(delivered[0].threadId).toBeNull();
     expect((JSON.parse(delivered[0].content) as { text: string }).text).toMatch(/reason/i);
 
     // Agent is not notified yet — the hold is still open.
@@ -190,6 +192,73 @@ describe('reject with reason', () => {
     expect(consumed).toBe(true);
     expect(await getPendingApproval('appr-2')).toBeUndefined();
     expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "too risky for prod"');
+  });
+
+  it('ignores a plain Reject on the card while a reason is awaited, so the reason still reaches the agent', async () => {
+    const { captureReasonReply } = await import('./reason-capture.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-reason-then-reject', 'install_packages');
+    await clickRejectWithReason('appr-reason-then-reject');
+
+    const outcome = await handleApprovalsResponse({
+      questionId: 'appr-reason-then-reject',
+      value: 'reject',
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: DM_PLATFORM,
+      threadId: null,
+    });
+    expect(outcome).toBe('ignored');
+    expect((await getPendingApproval('appr-reason-then-reject'))?.status).toBe('awaiting_reason');
+
+    expect(await captureReasonReply(dmReply('not on prod'))).toBe(true);
+    expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "not on prod"');
+  });
+
+  it('reports "Reject with reason" accepted only once a reason can be captured', async () => {
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-arm-first', 'install_packages');
+    let posted!: () => void;
+    deliverHold = new Promise<void>((resolve) => (posted = resolve));
+    const accepted = vi.fn();
+    const outcome = handleApprovalsResponse({
+      questionId: 'appr-arm-first',
+      value: REJECT_WITH_REASON_VALUE,
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: DM_PLATFORM,
+      threadId: null,
+      accepted,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The prompt is still on its way: the card must not show it yet.
+    expect(accepted).not.toHaveBeenCalled();
+    posted();
+    expect(await outcome).toBe('accepted');
+  });
+
+  it("reports the plain reject accepted before the agent is woken when the reason prompt can't be sent", async () => {
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    await seedApproval('appr-prompt-fails', 'install_packages');
+    setDeliveryAdapter({
+      async deliver() {
+        throw new Error('send failed');
+      },
+    });
+    // The agent's container start hangs.
+    vi.mocked(wakeContainer).mockImplementationOnce(() => new Promise(() => {}));
+    const accepted = vi.fn();
+    void handleApprovalsResponse({
+      questionId: 'appr-prompt-fails',
+      value: REJECT_WITH_REASON_VALUE,
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: DM_PLATFORM,
+      threadId: null,
+      accepted,
+    });
+    await vi.waitFor(() => expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin.'));
+    await vi.waitFor(() => expect(accepted).toHaveBeenCalledTimes(1));
   });
 
   it('truncates an over-long reason to 280 chars with an ellipsis', async () => {
@@ -226,6 +295,50 @@ describe('reject with reason', () => {
     const consumed = await captureReasonReply(dmReply('late reason'));
 
     expect(consumed).toBe(false);
+  });
+
+  it("prompts in the card's thread and captures the reply there when the card sits in the requester's chat", async () => {
+    const { captureReasonReply } = await import('./reason-capture.js');
+    await createMessagingGroup({
+      id: 'mg-dm-1',
+      channel_type: DM_CHANNEL,
+      platform_id: DM_PLATFORM,
+      instance: DM_INSTANCE,
+      name: 'Admin DM',
+      is_group: 0,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    // Same platform id on the default instance: the lookup must pick the card's own instance.
+    await createMessagingGroup({
+      id: 'mg-dm-default',
+      channel_type: DM_CHANNEL,
+      platform_id: DM_PLATFORM,
+      instance: DM_CHANNEL,
+      name: 'Admin DM (default bot)',
+      is_group: 0,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    await createSession({
+      id: 'sess-thread',
+      agent_group_id: 'ag-1',
+      messaging_group_id: 'mg-dm-1',
+      thread_id: 'thread-1',
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: now(),
+      created_at: now(),
+    });
+    await seedApproval('appr-thread', 'create_agent', 'sess-thread');
+    await clickRejectWithReason('appr-thread');
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].threadId).toBe('thread-1');
+
+    expect(await captureReasonReply(dmReply('not now', 'thread-1'))).toBe(true);
+    expect(lastRelayedText()).toBe('Your create_agent request was rejected by admin: "not now"');
   });
 
   it('ignores DMs on channels with no armed reason capture', async () => {

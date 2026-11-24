@@ -70,8 +70,11 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'src/channels/slack-lib.test.ts',
       'src/channels/slack-a2a-guard.ts',
       'src/channels/slack-a2a-guard.test.ts',
+      'src/channels/slack-raw-text.ts',
+      'src/channels/slack-raw-text.test.ts',
       'src/channels/slack-registration.test.ts',
       'src/channels/slack-instances-registration.test.ts',
+      'src/channels/slack-long-replies.test.ts',
       'src/provisioning/slack-app.ts',
       'src/provisioning/slack-app.test.ts',
       'container/skills/slack-formatting/SKILL.md',
@@ -84,9 +87,9 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'src/channels/index.ts',
       'src/channels/index.ts',
     ]);
-    // The adapter and the guard are SEPARATE fences (idempotency is keyed on a
-    // fence's first line): an install that already has `import './slack.js';`
-    // from the pre-payload skill still gains the guard on a re-run.
+    // The adapter and the guard are separate fences. A re-run on an install
+    // that already has `import './slack.js';` from the pre-payload skill still
+    // gains the guard.
     expect(appends[0].body).toEqual(["import './slack.js';"]);
     expect(appends[1].body).toEqual(["import './slack-a2a-guard.js';"]);
     // The agents-feature module/tool barrel appends live in /slack-agent-flow;
@@ -96,7 +99,7 @@ describe('skill-directives parser, on the converted add-slack', () => {
 
   it('reads the dependency pinned exactly', () => {
     const dep = directives.find((d) => d.kind === 'dep')!;
-    expect(dep.body).toEqual(['@chat-adapter/slack@4.29.0']);
+    expect(dep.body).toEqual(['@chat-adapter/slack@4.41.1']);
   });
 
   it('tags the runs with their effects', () => {
@@ -134,7 +137,7 @@ describe('skill-directives parser, on the converted add-slack', () => {
     const resolve = runs.find((d) => d.attrs.capture === 'platform_id')!;
     expect(resolve).toBeTruthy();
     expect(resolve.body.join(' ')).toMatch(/conversations\.open/);
-    expect(resolve.body.join(' ')).toMatch(/"slack:" \+ \.channel\.id/); // emits the slack:<id> platform_id
+    expect(resolve.body.join(' ')).toMatch(/\.channel\.id \/\/ error\(.*"slack:" \+ \./); // emits the slack:<id> platform_id
   });
 
   it('wires the captured variables into env-set via {{var}} references, one per mode', () => {

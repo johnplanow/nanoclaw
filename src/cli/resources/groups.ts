@@ -1,3 +1,4 @@
+import { connectGatewayAccount } from '../../gateway-connections.js';
 import { randomUUID } from 'crypto';
 
 import {
@@ -7,7 +8,8 @@ import {
   type AdditionalMountConfig,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
+import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -21,6 +23,9 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { reservedMountClass } from '../../modules/mount-security/index.js';
+import { getProviderHostContract } from '../../provider-contracts/registry.js';
+import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -32,6 +37,7 @@ import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
 import { localizeIsoTimestamps } from '../format.js';
+import { projectDestinationsToSessions } from './destinations.js';
 
 /**
  * Parse a --timezone flag: undefined = not passed, null = explicit clear
@@ -51,6 +57,21 @@ function parseTimezoneFlag(value: unknown): string | null | undefined {
   return tz;
 }
 
+/**
+ * `--speed` vocabulary is provider-declared (`inference.speedTiers` on the host
+ * contract). Core only checks membership and stores the name; `""` (clear) is
+ * handled by the caller and never reaches here.
+ */
+function assertDeclaredSpeedTier(speed: string, provider: string): void {
+  const tiers = getProviderHostContract(provider)?.inference?.speedTiers;
+  if (tiers === undefined) {
+    throw new Error(`provider "${provider}" declares no speed tiers; --speed accepts only "" (clear)`);
+  }
+  if (!tiers.includes(speed)) {
+    throw new Error(`--speed "${speed}" is not a speed tier of provider "${provider}" (declared: ${tiers.join(', ')})`);
+  }
+}
+
 /** Deserialize JSON columns for display. */
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
   return {
@@ -58,6 +79,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     provider: row.provider,
     model: row.model,
     effort: row.effort,
+    speed: row.speed,
     image_tag: row.image_tag,
     assistant_name: row.assistant_name,
     max_messages_per_prompt: row.max_messages_per_prompt,
@@ -104,6 +126,16 @@ registerResource({
   // DELETE violates FK constraints (#2525).
   operations: { list: 'open', get: 'open', update: 'approval' },
   customOperations: {
+    connect: {
+      access: 'open',
+      description:
+        'Get the selected gateway’s account-connection step for any --host. Does not grant credentials or change policy.',
+      handler: async (args, ctx) => {
+        const id = ctx.caller === 'agent' ? ctx.agentGroupId : String(args.id ?? '');
+        if (!id) throw new Error('--id is required on the host');
+        return connectGatewayAccount(id, String(args.host ?? ''));
+      },
+    },
     create: {
       access: 'approval',
       description:
@@ -205,9 +237,10 @@ registerResource({
     delete: {
       access: 'approval',
       description:
-        'Delete an agent group and its dependent rows (sessions, destinations, approvals, role grants, ' +
+        'Delete an agent group and its dependent rows (sessions and their host bookkeeping, destinations, approvals, role grants, ' +
         'memberships, channel wirings). FK-ordered cascade in a single transaction. ' +
-        'Use --id <group-id>. Out of scope: killing running containers, on-disk cleanup of groups/<folder>/ and data/v2-sessions/<group-id>/. ' +
+        "Use --id <group-id>. The host sweep stops the group's running containers within about a minute. " +
+        'Out of scope: on-disk cleanup of groups/<folder>/ and data/v2-sessions/<group-id>/. ' +
         'The leftover groups/<folder>/ blocks re-creating a group under the same folder name until it is moved or removed.',
       handler: async (args) => {
         const id = args.id as string;
@@ -221,6 +254,7 @@ registerResource({
 
         const hasAgentDestinations = await hasTable(db, 'agent_destinations');
         const hasPendingApprovals = await hasTable(db, 'pending_approvals');
+        let destinationOwners: string[] = [];
 
         // FK-ordered cascade. The async driver transaction rolls
         // back the whole thing if any statement throws (e.g. an FK constraint
@@ -232,6 +266,9 @@ registerResource({
             sessions: 0,
             pending_questions: 0,
             pending_approvals: 0,
+            session_claims: 0,
+            delivery_attempts: 0,
+            wake_signals: 0,
             agent_destinations_owned: 0,
             agent_destinations_pointing: 0,
             pending_sender_approvals: 0,
@@ -246,6 +283,13 @@ registerResource({
             counts.agent_destinations_owned = (
               await db.run('DELETE FROM agent_destinations WHERE agent_group_id = ?', id)
             ).changes;
+            destinationOwners = (
+              await db.all<{ agent_group_id: string }>(
+                'SELECT DISTINCT agent_group_id FROM agent_destinations WHERE target_type = ? AND target_id = ?',
+                'agent',
+                id,
+              )
+            ).map((row) => row.agent_group_id);
             counts.agent_destinations_pointing = (
               await db.run('DELETE FROM agent_destinations WHERE target_type = ? AND target_id = ?', 'agent', id)
             ).changes;
@@ -265,6 +309,17 @@ registerResource({
               )
             ).changes;
           }
+          // No FK on the host-coordination tables; cleared here so they don't outlive the session.
+          const sessionIds = 'SELECT id FROM sessions WHERE agent_group_id = ?';
+          counts.session_claims = (
+            await db.run(`DELETE FROM session_claims WHERE session_id IN (${sessionIds})`, id)
+          ).changes;
+          counts.delivery_attempts = (
+            await db.run(`DELETE FROM delivery_attempts WHERE session_id IN (${sessionIds})`, id)
+          ).changes;
+          counts.wake_signals = (
+            await db.run(`DELETE FROM wake_signals WHERE session_id IN (${sessionIds})`, id)
+          ).changes;
           counts.sessions = (await db.run('DELETE FROM sessions WHERE agent_group_id = ?', id)).changes;
           counts.pending_sender_approvals = (
             await db.run('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?', id)
@@ -288,6 +343,9 @@ registerResource({
           return counts;
         });
 
+        // Like `destinations remove`: drop the group from live session mailboxes now, not at next spawn.
+        for (const agentGroupId of destinationOwners) await projectDestinationsToSessions(agentGroupId);
+
         return { deleted: id, removed };
       },
     },
@@ -295,7 +353,8 @@ registerResource({
       access: 'approval',
       description:
         'Restart containers for a group. Use --id <group-id> [--rebuild] [--message <text>]. ' +
-        'From inside a container, --id is auto-filled and only the calling session is restarted. ' +
+        'From inside a container, --id is auto-filled and only the calling session is restarted; ' +
+        'an explicit --id of another group (global scope only) restarts that group’s running containers. ' +
         '--rebuild rebuilds the container image first (required for package changes). ' +
         '--message sets an on-wake instruction for the fresh container to act on when it starts — ' +
         'use this when you need to continue after the restart (e.g. verify a new tool works, notify the user). ' +
@@ -321,8 +380,10 @@ registerResource({
         }
         const message = args.message as string | undefined;
 
-        // From an agent: scope to the calling session only
-        if (ctx.caller === 'agent') {
+        // From an agent about its own group: scope to the calling session only.
+        // A foreign --id (global scope, after approval) takes the group path
+        // below; this branch would restart the caller instead (#3911).
+        if (ctx.caller === 'agent' && id === ctx.agentGroupId) {
           if (message) {
             await writeSessionMessage(id, ctx.sessionId, {
               id: `restart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -342,7 +403,7 @@ registerResource({
               ? () => {
                   void (async () => {
                     const s = await getSession(ctx.sessionId);
-                    if (s) await wakeContainer(s);
+                    if (s) await requestWake(s, 'cli');
                   })();
                 }
               : undefined,
@@ -350,7 +411,7 @@ registerResource({
           return { restarted: 1, rebuilt: !!args.rebuild };
         }
 
-        // From the host: restart all running containers in the group
+        // From the host, or an agent naming another group: restart all running containers in the group
         const count = await restartAgentGroupContainers(id, 'restarted via ncl', message);
         return { restarted: count, rebuilt: !!args.rebuild };
       },
@@ -370,7 +431,8 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
@@ -384,6 +446,7 @@ registerResource({
             | 'provider'
             | 'model'
             | 'effort'
+            | 'speed'
             | 'image_tag'
             | 'assistant_name'
             | 'max_messages_per_prompt'
@@ -396,6 +459,14 @@ registerResource({
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
+        if (args.speed !== undefined) {
+          const speed = args.speed as string;
+          // Validate against the provider the group will actually run on —
+          // the same rule spawn applies, with a `--provider` in this command
+          // taking precedence over the stored one.
+          if (speed !== '') assertDeclaredSpeedTier(speed, resolveProviderName(updates.provider, row.provider));
+          updates.speed = speed || null;
+        }
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
@@ -410,7 +481,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }
 
@@ -568,6 +639,16 @@ registerResource({
 
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
+
+        // Stored, a path the driver reserves would make it refuse every start of the group.
+        // A copy is fine advice for install content, never for keys and certificates.
+        const reserved = await reservedMountClass(id, hostPath);
+        if (reserved === 'install-surface') {
+          throw new Error(`${hostPath} is NanoClaw's own ${reserved} content; only NanoClaw mounts it. Mount a copy.`);
+        }
+        if (reserved) {
+          throw new Error(`${hostPath} holds NanoClaw's ${reserved} keys or certificates; only NanoClaw mounts it.`);
+        }
 
         const mount: AdditionalMountConfig = {
           hostPath,
