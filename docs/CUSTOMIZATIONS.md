@@ -215,22 +215,33 @@ chat turns owing any reply). Not superseded by it.
 
 ## v2 operational notes (post-migration, 2026-07-03)
 
-- **Services:** `nanoclaw.service` kept (ExecStart `node dist/index.js`,
-  matches v2; v2's own setup would have created a slugged unit — not adopted).
+- **Services:** on VM 206 the unit is the slugged `nanoclaw-v2-183b565e.service`
+  since 2026-11-23 (the `/update-nanoclaw` controller only manages that name and
+  refuses to cut over otherwise); `nanoclaw.service` is a symlink alias, so
+  `systemctl --user restart nanoclaw` still works. ExecStart `node dist/index.js`.
   `gpt-researcher.service` retired 2026-07-03 (stopped + disabled, see §2b–4).
-- **Agent image:** `nanoclaw-agent-v2-61d30892:latest` (slug of the project
-  root). Rebuild: `./container/build.sh` (prune buildkit builder first —
+- **Agent image:** `nanoclaw-agent-v2-<slug>:latest` (slug of the project
+  root: `183b565e` on 206, `61d30892` on aliera). After a base-image change also
+  rebuild per-group images: `ncl groups restart --id <g> --rebuild`. Rebuild: `./container/build.sh` (prune buildkit builder first —
   `--no-cache` alone does not invalidate COPY).
 - **OneCLI:** gateway (docker compose `onecli` + `onecli-postgres-1`) on
   `http://172.17.0.1:10254`; CLI at `~/.local/bin/onecli`; Anthropic subscription
   token vaulted as secret "Anthropic". Upgrades: `docs/onecli-upgrades.md`.
+  Since 2026-11-23: gateway **1.45.0** (pin in
+  `.claude/skills/add-onecli/versions.json`), CLI 2.11.0, own Postgres password
+  in `~/.onecli/.env`. Access is per-agent **grants** (`onecli agents grants
+  list|attach-secret|detach-secret`); a new group gets only its model
+  credential, so tool secrets must be attached explicitly.
 - **Owner:** `slack:U0ANEA7PYEM` (global owner in `user_roles`).
 - **Data:** v2 state in `data/v2.db` + `data/v2-sessions/`; v1 data
   (`store/messages.db`, `data/sessions/`, groups CLAUDE.md) left in place
   read-only as rollback, plus `~/nanoclaw-backups/pre-v2-20260703/`.
 - **Package manager:** pnpm (corepack), Node ≥ 20; container agent-runner is Bun.
-- **Updates:** `/update-nanoclaw` for normal same-line updates; the intent-based
-  `/migrate-nanoclaw` + `.nanoclaw-migrations/` guide for the next major.
+- **Updates:** `/update-nanoclaw` (transactional). Stage + resolve + validate on
+  aliera, push the validated commit as a temp branch, then run the same
+  controller on 206 with `prepare --upstream-ref origin/<branch>` through
+  `finish`; never cut over on aliera. After any plain `git pull` on 206, re-stamp
+  before the next restart: `pnpm exec tsx scripts/upgrade-state.ts set "" update-nanoclaw`.
 
 ## 9. Task delivery: origin-thread inheritance + legacy-task visibility (2026-08-24)
 
