@@ -271,6 +271,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // Fork: a script-gated task can leave only ambient rows behind (trigger=0
+    // accumulate rows, cross-session echoes). Those were never addressed to
+    // this session, so they must not get a turn of their own — with reply
+    // enforcement the agent then posts a filler reply, which echoes into the
+    // sibling threads and repeats on every watcher tick. Drop them instead.
+    if (!keep.some((m) => m.trigger === 1 && !isSessionEcho(m))) {
+      markCompleted(keep.map((m) => m.id));
+      log(`Only ambient context left after script gating (${keep.length} row(s)), skipping query`);
+      continue;
+    }
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
@@ -403,8 +414,16 @@ interface QueryResult {
  * tasks, or system messages). Such a turn owes the user a <message> reply —
  * see reply enforcement in processQuery.
  */
-function batchHasUserChat(messages: { kind: string; id: string }[]): boolean {
-  return messages.some((m) => (m.kind === 'chat' || m.kind === 'chat-sdk') && !m.id.startsWith('restart-'));
+function batchHasUserChat(messages: MessageInRow[]): boolean {
+  return messages.some(
+    (m) =>
+      (m.kind === 'chat' || m.kind === 'chat-sdk') &&
+      !m.id.startsWith('restart-') &&
+      // Ambient rows (accumulated context, cross-session echoes) are not
+      // addressed to this session and owe nobody a reply.
+      m.trigger === 1 &&
+      !isSessionEcho(m),
+  );
 }
 
 export async function processQuery(
@@ -631,6 +650,11 @@ export async function processQuery(
         // MODULE-HOOK:scheduling-pre-task-followup:end
 
         if (keep.length === 0) return;
+        // Fork: same ambient-only guard as the initial batch (see above).
+        if (!keep.some((m) => m.trigger === 1 && !isSessionEcho(m))) {
+          markCompleted(keep.map((m) => m.id));
+          return;
+        }
         // Re-check done — the outer query may have finished while the script
         // was awaited. Pushing into a closed stream is wasted work; the
         // claimed messages get released by the host's processing-claim sweep.
